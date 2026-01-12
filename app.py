@@ -6,7 +6,7 @@ import pandas as pd
 st.set_page_config(page_title="高校野球DB完全版", layout="wide", page_icon="⚾")
 st.title("⚾ 高校野球 全記録データベース")
 
-# CSS調整（テーブルの文字サイズやヘッダー）
+# CSS調整
 st.markdown("""
 <style>
     .stDataFrame {font-size: 0.95rem;}
@@ -52,7 +52,7 @@ if mode == "🏆 大会から探す":
             st.write("👇 **詳細を見たい高校の行をクリックしてください**")
             
             # School_ID順（北から順）
-            # History_Label（2年連続 etc）を表示
+            # データ確認済み：History_Labelは存在します
             df_res = client.query(f"""
                 SELECT School, History_Label, Result, Game_Scores, School_ID 
                 FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
@@ -61,7 +61,6 @@ if mode == "🏆 大会から探す":
             """).to_dataframe()
             
             # 表示用データ作成
-            # History_Labelの改行が見やすいように列設定をする手もあるが、まずはそのまま表示
             display_df = df_res[['School', 'History_Label', 'Result', 'Game_Scores']].rename(columns={
                 'School': '高校名',
                 'History_Label': '出場情報',
@@ -86,7 +85,8 @@ if mode == "🏆 大会から探す":
                 
                 st.divider()
                 st.markdown(f"## 🏫 **{row_data['School']}**")
-                st.info(f"📝 {row_data['History_Label']}") # 情報を強調表示
+                # 改行コードを含むテキストを綺麗に表示
+                st.info(row_data['History_Label']) 
                 
                 tab1, tab2 = st.tabs(["🦁 当時のメンバー", "📜 大会履歴"])
                 
@@ -100,7 +100,9 @@ if mode == "🏆 大会から探す":
                     """
                     df_mem = client.query(m_query).to_dataframe()
                     if not df_mem.empty:
-                        df_mem['Captain'] = df_mem['Captain'].apply(lambda x: "★主将" if "◎" in str(x) else "")
+                        # 主将マーク
+                        if 'Captain' in df_mem.columns:
+                            df_mem['Captain'] = df_mem['Captain'].apply(lambda x: "★主将" if "◎" in str(x) else "")
                         st.dataframe(df_mem.rename(columns={'Name':'氏名','Grade':'学年','Uniform_Number':'背番号','Position':'守備','Throw_Bat':'投打','Captain':'役職'}), use_container_width=True, hide_index=True)
                     else:
                         st.warning("メンバーデータなし")
@@ -136,16 +138,21 @@ elif mode == "👤 選手から探す":
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` m ON c.Player_ID = m.Player_ID 
             WHERE {' AND '.join(where)} ORDER BY c.Year ASC
         """
-        df = client.query(q).to_dataframe()
-        if not df.empty:
-            df['lbl'] = df['Name'] + " (" + df['School'] + ")"
-            sel = st.selectbox("選択", df['lbl'].unique())
-            if sel:
-                p = df[df['lbl']==sel].iloc[0]
-                p_all = df[df['lbl']==sel]
-                st.markdown(f"## {p['Name']} ({p['School']})")
-                if pd.notna(p['Pro_Team']): st.success(f"🚀 {p['Pro_Team']}")
-                st.dataframe(p_all[['Year','Season','Grade','Result','Game_Scores']], use_container_width=True, hide_index=True)
+        try:
+            df = client.query(q).to_dataframe()
+            if not df.empty:
+                df['lbl'] = df['Name'] + " (" + df['School'] + ")"
+                sel = st.selectbox("選択", df['lbl'].unique())
+                if sel:
+                    p = df[df['lbl']==sel].iloc[0]
+                    p_all = df[df['lbl']==sel]
+                    st.markdown(f"## {p['Name']} ({p['School']})")
+                    if pd.notna(p['Pro_Team']): st.success(f"🚀 {p['Pro_Team']}")
+                    st.dataframe(p_all[['Year','Season','Grade','Result','Game_Scores']], use_container_width=True, hide_index=True)
+            else:
+                st.warning("見つかりませんでした")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 # ==========================================
 # 🏫 モード: 高校検索 (変更なし)
