@@ -39,29 +39,44 @@ if name_input or year_input:
             if selected_label:
                 p = df_players[df_players['display_label'] == selected_label].iloc[0]
                 
-                # --- プロフィール表示（進路・ドラフト情報を目立たせる） ---
+                # --- プロフィール表示（指名実績・代表歴を強調） ---
                 st.markdown(f"## **{p['名前']}** ({p['高校']})")
                 
-                # 進路・ドラフト情報がある場合は強調表示
+                # 指名実績の整形（「位」を付与）
                 info_parts = []
                 if pd.notna(p.get('球団')): info_parts.append(f"**{p['球団']}**")
-                if pd.notna(p.get('ドラフト')): info_parts.append(f"{int(p['ドラフト'])}年ドラフト")
-                if pd.notna(p.get('順位')): info_parts.append(f"{p['順位']}")
+                if pd.notna(p.get('ドラフト')): 
+                    d_year = str(p['ドラフト']).split('.')[0]
+                    info_parts.append(f"{d_year}年ドラフト")
+                if pd.notna(p.get('順位')): 
+                    rank_val = str(p['順位'])
+                    # 「育成」が含まれていればそのまま、なければ「位」をつける
+                    rank_display = rank_val if "育成" in rank_val else f"{rank_val}位"
+                    info_parts.append(rank_display)
                 
                 if info_parts:
-                    st.success(f"🚀 **経歴:** {' / '.join(info_parts)} (進路: {p.get('進路', '-')})")
-                elif pd.notna(p.get('進路')):
-                    st.info(f"📍 **進路:** {p['進路']}")
+                    st.success(f"🚀 **プロ入り実績:** {' / '.join(info_parts)}")
+
+                # --- 代表経験セクション ---
+                rep_list = []
+                # 代表関連の列をチェック
+                for rep_col in ['U12', 'U15', 'U18', 'U22', '侍JAPAN']:
+                    if rep_col in p and pd.notna(p[rep_col]) and str(p[rep_col]).strip() != "":
+                        # 値が「1」や「○」などの場合を想定して列名自体をラベルに
+                        rep_list.append(f"🇯🇵 {rep_col}")
+                
+                if rep_list:
+                    st.warning(f"🏅 **代表経験:** {' ／ '.join(rep_list)}")
 
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**世代:** {p['世代']}年 / **出身:** {p['出身']}")
                 with col2:
-                    st.write(f"**ポジション:** {p['Position']}")
+                    st.write(f"**ポジション:** {p['Position']} / **進路:** {p.get('進路', '-')}")
                 
                 st.divider()
 
-                # 2. キャリアとメンバー情報の統合取得（2020年重複削除済み）
+                # 2. キャリアとメンバー情報の統合取得
                 st.subheader("🏟️ 甲子園出場・詳細記録")
                 
                 career_query = f"""
@@ -80,7 +95,6 @@ if name_input or year_input:
                 df_career = client.query(career_query).to_dataframe()
                 
                 if not df_career.empty:
-                    # 主将表示の加工
                     if '主将' in df_career.columns:
                         df_career['役職'] = df_career['主将'].apply(lambda x: "★主将" if str(x) in ["1", "1.0", "主将"] else "-")
                     
