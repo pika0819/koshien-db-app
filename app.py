@@ -23,7 +23,6 @@ with st.sidebar:
 
 if name_input or year_input:
     try:
-        # 選手検索クエリ
         where_clauses = [f"c.`名前` LIKE '%{name_input}%'"] if name_input else []
         if year_input: where_clauses.append(f"m.`世代` = {year_input}")
         where_sql = " AND ".join(where_clauses)
@@ -45,11 +44,9 @@ if name_input or year_input:
             
             if selected_label:
                 p = df_players[df_players['display_label'] == selected_label].iloc[0]
-                
-                # --- プロフィール表示 ---
                 st.markdown(f"## **{p['名前']}** （{p['高校']}）")
                 
-                # 1. 生年月日の整形 (2002年08月19日 形式)
+                # 1. 生年月日の整形 (2002年08月19日)
                 bday_display = "不明"
                 if pd.notna(p.get('生年月日')):
                     try:
@@ -57,17 +54,13 @@ if name_input or year_input:
                         bday_display = bday_dt.strftime('%Y年%m月%d日')
                     except:
                         bday_display = str(p['生年月日'])
-                
                 st.write(f"🎂 **生年月日:** {bday_display} / **出身:** {p['出身']} / **世代:** {p['世代']}年")
 
-                # 2. プロ入り実績 (育成も位を表示)
+                # 2. プロ入り実績 (順位は「位」を付与)
                 if pd.notna(p.get('球団')):
                     draft_parts = [f"🚀 **{p['球団']}**"]
                     if pd.notna(p.get('ドラフト')): draft_parts.append(f"{str(p['ドラフト']).split('.')[0]}年")
-                    if pd.notna(p.get('順位')):
-                        r = str(p['順位'])
-                        # 育成Xもそのまま「位」を付ける (例: 育成4位)
-                        draft_parts.append(f"{r}位")
+                    if pd.notna(p.get('順位')): draft_parts.append(f"{p['順位']}位")
                     st.success(" / ".join(draft_parts))
 
                 # 3. 代表歴解読
@@ -78,7 +71,7 @@ if name_input or year_input:
                         label = col
                         if col == '侍JAPAN' and val.startswith('*'):
                             label = f"侍JAPAN (20{val.replace('*', '')}年)"
-                        elif val not in ["1", "〇", "◎"]:
+                        elif val != "1" and val != "◎": # 1や◎以外は背番号とみなす
                             label = f"{col} (背番号:{val})"
                         reps.append(f"🇯🇵 {label}")
                 if reps: st.warning(f"🏅 **代表経験:** {' ／ '.join(reps)}")
@@ -87,8 +80,6 @@ if name_input or year_input:
 
                 # --- 詳細な出場記録 ---
                 st.subheader("🏟️ 甲子園出場・詳細記録")
-                
-                # キャリア統合(c)と出場メンバー(mem)の両方の主将・主主将列をチェック
                 career_query = f"""
                     SELECT DISTINCT c.`Year`, c.`Season`, c.`学年`, mem.`背番号`, 
                            mem.`主将` as `mem_capt`, c.`主主将` as `car_capt`, mem.`投打`, c.`成績`
@@ -97,27 +88,27 @@ if name_input or year_input:
                         ON c.`Player_ID` = mem.`Player_ID` AND c.`Year` = mem.`Year` AND c.`Season` = mem.`Season`
                     WHERE c.`Player_ID` = '{p['Player_ID']}' ORDER BY c.`Year` ASC
                 """
-                df_career = client.query(career_query).to_dataframe()
+                # ※上記でエラーが出た場合は再度「主将」へ修正
+                try:
+                    df_career = client.query(career_query).to_dataframe()
+                except:
+                    # 主主将でコケた場合のセーフティ
+                    career_query = career_query.replace("c.`主主将` as `car_capt`","c.`主主将` as `car_capt`").replace("c.`主主将`","c.`主将`")
+                    df_career = client.query(career_query).to_dataframe()
 
                 if not df_career.empty:
-                    # 主将判定ロジック強化 (◎を追加)
+                    # ◎ だけを拾うロジック
                     def judge_captain(row):
-                        # チェック対象の値をリスト化
                         vals = [str(row.get('mem_capt', '')), str(row.get('car_capt', ''))]
-                        capt_marks = ["1", "1.0", "主将", "〇", "◎"]
-                        if any(any(m in v for m in capt_marks) for v in vals):
+                        if any("◎" in v for v in vals):
                             return "★主将"
                         return "-"
 
                     df_career['役職'] = df_career.apply(judge_captain, axis=1)
-                    
-                    # 表示列の整理
                     display_cols = ['Year', 'Season', '学年', '背番号', '投打', '役職', '成績']
                     st.dataframe(df_career[[c for c in display_cols if c in df_career.columns]], use_container_width=True, hide_index=True)
                 else:
                     st.info("出場記録の詳細はありません。")
 
     except Exception as e:
-        st.error(f"データ取得エラー: {e}")
-else:
-    st.info("選手名を入力して検索してください。")
+        st.error(f"エラー: {e}")
