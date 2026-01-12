@@ -2,6 +2,7 @@ import streamlit as st
 from google.cloud import bigquery
 import pandas as pd
 
+# ページ基本設定
 st.set_page_config(page_title="甲子園全記録DB", layout="wide")
 st.title("⚾️ 甲子園全記録データベース")
 
@@ -13,6 +14,7 @@ client = get_bq_client()
 PROJECT_ID = "koshien-db"
 DATASET_ID = "koshien_data"
 
+# --- サイドバー検索 ---
 with st.sidebar:
     st.header("🔍 選手検索")
     name_input = st.text_input("選手名", placeholder="例：高橋宏斗")
@@ -20,18 +22,13 @@ with st.sidebar:
 
 if name_input or year_input:
     try:
-        # 1. 基本情報の検索（実績シートとの結合を一旦やめ、確実に動く形に）
+        # 1. 基本情報の検索
         where_clauses = []
         if name_input: where_clauses.append(f"m.`名前` LIKE '%{name_input}%'")
         if year_input: where_clauses.append(f"m.`世代` = {year_input}")
         where_sql = " AND ".join(where_clauses)
         
-        query = f"""
-            SELECT m.*
-            FROM `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` AS m
-            WHERE {where_sql}
-            LIMIT 50
-        """
+        query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` AS m WHERE {where_sql} LIMIT 50"
         df_players = client.query(query).to_dataframe()
 
         if not df_players.empty:
@@ -42,8 +39,29 @@ if name_input or year_input:
             if selected_label:
                 p = df_players[df_players['display_label'] == selected_label].iloc[0]
                 
-                # --- 出場記録・詳細の取得 ---
-                # 出場メンバー(mem)から「投打」「主将」「背番号」をまとめて取得します
+                # --- プロフィール表示（進路・ドラフト情報を目立たせる） ---
+                st.markdown(f"## **{p['名前']}** ({p['高校']})")
+                
+                # 進路・ドラフト情報がある場合は強調表示
+                info_parts = []
+                if pd.notna(p.get('球団')): info_parts.append(f"**{p['球団']}**")
+                if pd.notna(p.get('ドラフト')): info_parts.append(f"{int(p['ドラフト'])}年ドラフト")
+                if pd.notna(p.get('順位')): info_parts.append(f"{p['順位']}")
+                
+                if info_parts:
+                    st.success(f"🚀 **経歴:** {' / '.join(info_parts)} (進路: {p.get('進路', '-')})")
+                elif pd.notna(p.get('進路')):
+                    st.info(f"📍 **進路:** {p['進路']}")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**世代:** {p['世代']}年 / **出身:** {p['出身']}")
+                with col2:
+                    st.write(f"**ポジション:** {p['Position']}")
+                
+                st.divider()
+
+                # 2. キャリアとメンバー情報の統合取得（2020年重複削除済み）
                 st.subheader("🏟️ 甲子園出場・詳細記録")
                 
                 career_query = f"""
@@ -59,22 +77,8 @@ if name_input or year_input:
                     WHERE c.`Player_ID` = '{p['Player_ID']}'
                     ORDER BY c.`Year` ASC, c.`学年` ASC
                 """
-                
                 df_career = client.query(career_query).to_dataframe()
                 
-                # --- プロフィール表示（出場記録から最新の投打を引用） ---
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"### **{p['名前']}** ({p['高校']})")
-                    st.write(f"世代: {p['世代']}年 / 出身: {p['出身']}")
-                with col2:
-                    current_style = "-"
-                    if not df_career.empty and '投打' in df_career.columns:
-                        current_style = df_career.iloc[-1]['投打'] # 最新大会の投打を表示
-                    st.write(f"守備: {p['Position']} / 投打: {current_style}")
-                
-                st.divider()
-
                 if not df_career.empty:
                     # 主将表示の加工
                     if '主将' in df_career.columns:
