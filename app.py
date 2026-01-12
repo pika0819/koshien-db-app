@@ -19,13 +19,10 @@ DATASET_ID = "koshien_data"
 # --- サイドバー：検索・フィルタ ---
 with st.sidebar:
     st.header("🔍 選手を探す")
-    name_input = st.text_input("選手名", placeholder="例：沢村栄治")
-    
-    # 世代（西暦）での絞り込みも追加
+    name_input = st.text_input("選手名", placeholder="例：坂本勇人")
     year_input = st.number_input("世代（西暦）", min_value=1915, max_value=2026, value=None, step=1)
 
 # --- メイン処理 ---
-# 検索クエリの組み立て
 where_clauses = []
 if name_input:
     where_clauses.append(f"`名前` LIKE '%{name_input}%'")
@@ -38,51 +35,51 @@ if where_clauses:
         SELECT `UUID`, `名前`, `高校`, `世代`, `出身`, `Position`
         FROM `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報`
         WHERE {where_sql}
-        LIMIT 100
+        LIMIT 50
     """
     
-    df_players = client.query(query).to_dataframe()
+    try:
+        df_players = client.query(query).to_dataframe()
 
-    if not df_players.empty:
-        st.subheader("選手一覧")
-        st.write("詳細を見たい選手を選択してください：")
-        
-        # 選択用のデータフレーム表示
-        # column_configを使ってUUIDを隠しつつ選択可能にする
-        selected_rows = st.dataframe(
-            df_players,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single_row",
-            use_container_width=True,
-            column_config={"UUID": None} # UUIDは裏側で使うので非表示
-        )
-
-        # 選手が選択された場合の処理
-        if len(selected_rows.selection.rows) > 0:
-            selected_idx = selected_rows.selection.rows[0]
-            player_uuid = df_players.iloc[selected_idx]["UUID"]
-            player_name = df_players.iloc[selected_idx]["名前"]
-
+        if not df_players.empty:
+            st.subheader("選手一覧")
+            # 検索結果を一覧表示
+            st.dataframe(df_players.drop(columns=['UUID']), use_container_width=True)
+            
+            # --- 選手詳細の表示（ラジオボタンで選択） ---
             st.divider()
-            st.subheader(f"🛡️ {player_name} 選手のキャリア実績")
+            st.write("### 🛡️ キャリア詳細を表示する選手を選択")
+            
+            # 選択肢用のラベル作成（例：坂本勇人 (光星学院)）
+            df_players['label'] = df_players['名前'] + " (" + df_players['高校'] + ")"
+            selected_label = st.selectbox("詳細を見たい選手を選んでください", options=df_players['label'].tolist())
+            
+            if selected_label:
+                # 選択された選手のUUIDを取得
+                selected_player = df_players[df_players['label'] == selected_label].iloc[0]
+                player_uuid = selected_player['UUID']
+                player_name = selected_player['名前']
 
-            # キャリア統合テーブルからデータを取得
-            career_query = f"""
-                SELECT `Year`, `Season`, `学年`, `背番号`, `成績`
-                FROM `{PROJECT_ID}.{DATASET_ID}.DB_選手キャリア統合`
-                WHERE `Player_ID` = (
-                    SELECT `Player_ID` FROM `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` WHERE `UUID` = '{player_uuid}'
-                )
-                ORDER BY `Year` ASC, `学年` ASC
-            """
-            df_career = client.query(career_query).to_dataframe()
+                # キャリア統合テーブルからデータを取得
+                career_query = f"""
+                    SELECT `Year`, `Season`, `学年`, `背番号`, `成績`
+                    FROM `{PROJECT_ID}.{DATASET_ID}.DB_選手キャリア統合`
+                    WHERE `Player_ID` = (
+                        SELECT `Player_ID` FROM `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` WHERE `UUID` = '{player_uuid}'
+                    )
+                    ORDER BY `Year` ASC, `学年` ASC
+                """
+                df_career = client.query(career_query).to_dataframe()
 
-            if not df_career.empty:
-                st.table(df_career) # タイムライン風にテーブル表示
-            else:
-                st.info("キャリア詳細は登録されていません。")
-    else:
-        st.warning("該当する選手が見つかりませんでした。")
+                st.write(f"#### {player_name} 選手の出場記録")
+                if not df_career.empty:
+                    st.table(df_career)
+                else:
+                    st.info("キャリア詳細は登録されていません。")
+        else:
+            st.warning("該当する選手が見つかりませんでした。")
+    except Exception as e:
+        st.error(f"データ取得中にエラーが発生しました。")
+        st.info("列名が正しくBigQueryに登録されているか確認してください。")
 else:
-    st.info("サイドバーから選手名や世代を入力して検索を開始してください。")
+    st.info("左のサイドバーから選手名を入力して検索を開始してください。")
