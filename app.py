@@ -2,7 +2,6 @@ import streamlit as st
 from google.cloud import bigquery
 import pandas as pd
 
-# --- ページ設定 ---
 st.set_page_config(page_title="甲子園全記録DB v2", layout="wide")
 st.title("⚾️ 甲子園全記録データベース")
 
@@ -21,21 +20,23 @@ COL_LABELS = {
     'Captain': '役職', 'Result': '成績', 'Game_Scores': '対戦詳細'
 }
 
-# --- サイドバー検索 ---
 with st.sidebar:
     st.header("🔍 選手を探す")
-    name_q = st.text_input("選手名（一部でも可）", placeholder="例：石垣元気")
-    gen_q = st.number_input("世代（入学年）", value=None, step=1, placeholder="例：2007")
+    name_q = st.text_input("選手名")
+    gen_q = st.number_input("世代", value=None, step=1)
 
-# --- メインコンテンツ ---
 if name_q or gen_q:
     try:
         where = []
         if name_q: where.append(f"c.Name LIKE '%{name_q}%'")
         if gen_q:  where.append(f"c.Generation = '{int(gen_q)}'")
         
+        # Tournamentを確実にcから取得し、mからは必要なプロフィールのみを取得
         query = f"""
-            SELECT c.*, m.Hometown, m.Pro_Team, m.Draft_Year, m.Draft_Rank
+            SELECT 
+                c.Player_ID, c.Name, c.School, c.Generation, c.Year, c.Season, 
+                c.Grade, c.Result, c.Tournament, c.Game_Scores, c.Throw_Bat, c.Uniform_Number, c.Captain,
+                m.Hometown, m.Pro_Team, m.Draft_Year, m.Draft_Rank
             FROM `{PROJECT_ID}.{DATASET_ID}.DB_選手キャリア統合` AS c
             LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.DB_マスタ_基本情報` AS m ON c.Player_ID = m.Player_ID
             WHERE {" AND ".join(where)} 
@@ -49,47 +50,45 @@ if name_q or gen_q:
             
             if target_player:
                 p_all = df[df['display'] == target_player].copy()
-                p = p_all.iloc[0] # プロフィール用
+                p = p_all.iloc[0]
                 
-                # 1. 選手ヘッダー
                 st.markdown(f"## **{p['Name']}** （{p['School']}）")
                 
-                # 2. プロフィール（ドラフト情報含む）
-                meta = [f"📅 **世代:** {p['Generation']}年"]
+                # プロフィール（欠損値対策）
+                meta = [f"📅 **世代:** {p.get('Generation', '不明')}年"]
                 if pd.notna(p.get('Hometown')): meta.append(f"📍 **出身:** {p['Hometown']}")
                 st.write(" / ".join(meta))
                 
-                if pd.notna(p.get('Pro_Team')) and str(p['Pro_Team']) != 'None':
-                    st.success(f"🚀 **{p['Pro_Team']}** ({str(p['Draft_Year'])}年 ドラフト{p['Draft_Rank']}位)")
+                if pd.notna(p.get('Pro_Team')) and str(p['Pro_Team']).lower() != 'none':
+                    st.success(f"🚀 **{p['Pro_Team']}** ({str(p['Draft_Year'])}年 {p['Draft_Rank']}位)")
 
                 st.divider()
-                
-                # 3. キャリア年表
                 st.subheader("🏟️ 甲子園出場・対戦成績")
+                
+                # 役職表示の変換
                 p_all['Captain'] = p_all['Captain'].apply(lambda x: "★主将" if "◎" in str(x) else "-")
                 
-                # 表示用にリネームして表示
-                show_cols = [c for c in COL_LABELS.keys() if c in p_all.columns]
-                st.dataframe(p_all[show_cols].rename(columns=COL_LABELS), use_container_width=True, hide_index=True)
+                # 【ここが重要】Tournamentなどの列が「確実に存在するか」チェックしてから表示
+                existing_cols = [c for c in COL_LABELS.keys() if c in p_all.columns]
+                show_df = p_all[existing_cols].rename(columns=COL_LABELS)
+                
+                st.dataframe(show_df, use_container_width=True, hide_index=True)
 
-                # 4. 【ドリルダウン】大会詳細の選択
-                st.divider()
-                tourney_list = p_all['Tournament'].dropna().unique()
-                if len(tourney_list) > 0:
-                    selected_t = st.selectbox("⏬ 大会全体の戦績を詳しく見る", tourney_list)
-                    if selected_t:
-                        st.info(f"「{selected_t}」の全対戦データをロードしています...")
-                        t_query = f"""
-                            SELECT Round as 回戦, Win_Loss as 勝敗, Score as スコア, 
-                                   School as 学校, Opponent as 対戦校, Game_Scores as 詳細
-                            FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
-                            WHERE Tournament = '{selected_t}'
-                            ORDER BY Round ASC
-                        """
-                        df_t = client.query(t_query).to_dataframe()
-                        st.dataframe(df_t, use_container_width=True, hide_index=True)
+                # ドリルダウン
+                if 'Tournament' in p_all.columns:
+                    tourneys = p_all['Tournament'].dropna().unique()
+                    if len(tourneys) > 0:
+                        selected_t = st.selectbox("⏬ 大会の全戦績を表示", tourneys)
+                        if selected_t:
+                            # 戦績データ(s)も英語化されている前提
+                            t_query = f"""
+                                SELECT Round, Win_Loss, Score, School, Opponent, Game_Scores
+                                FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
+                                WHERE Tournament = '{selected_t}'
+                                ORDER BY Round ASC
+                            """
+                            df_t = client.query(t_query).to_dataframe()
+                            st.table(df_t)
 
     except Exception as e:
-        st.error(f"システムエラーが発生しました。設定を確認してください。\nError: {e}")
-else:
-    st.info("左のサイドバーから選手名または世代を入力して検索を開始してください。")
+        st.error(f"Error: {e}")
