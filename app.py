@@ -2,7 +2,6 @@ import streamlit as st
 from google.cloud import bigquery
 import pandas as pd
 
-# --- 1. アプリ設定 ---
 st.set_page_config(page_title="高校野球DB完全版", layout="wide", page_icon="⚾")
 st.title("⚾ 高校野球 全記録データベース")
 
@@ -10,11 +9,9 @@ st.markdown("""
 <style>
     .stDataFrame {font-size: 0.95rem;}
     h3 {border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2rem;}
-    div[data-testid="stMetricValue"] {font-size: 1.4rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. BigQuery接続 ---
 @st.cache_resource
 def get_bq_client():
     return bigquery.Client.from_service_account_info(st.secrets["gcp_service_account"])
@@ -23,7 +20,6 @@ client = get_bq_client()
 PROJECT_ID = "koshien-db"
 DATASET_ID = "koshien_data"
 
-# --- 3. サイドバー ---
 with st.sidebar:
     st.header("📂 メニュー")
     mode = st.radio("検索モード", ["🏆 大会から探す", "👤 選手から探す", "🏫 高校から探す"])
@@ -35,10 +31,10 @@ if mode == "🏆 大会から探す":
     st.subheader("🏆 大会記録・出場校チェック")
     
     try:
+        # 大会マスタから年度取得
         df_years = client.query(f"SELECT DISTINCT Year FROM `{PROJECT_ID}.{DATASET_ID}.DB_大会マスタ` ORDER BY Year DESC").to_dataframe()
         years_list = df_years['Year'].tolist()
     except:
-        st.warning("大会データの読み込みに失敗しました。")
         years_list = []
 
     col1, col2 = st.columns(2)
@@ -47,34 +43,33 @@ if mode == "🏆 大会から探す":
     
     if sel_year and sel_season:
         t_info = client.query(f"SELECT Tournament, Champion FROM `{PROJECT_ID}.{DATASET_ID}.DB_大会マスタ` WHERE Year = '{sel_year}' AND Season = '{sel_season}'").to_dataframe()
+        
         if not t_info.empty:
             champ = t_info.iloc[0].get('Champion', '不明')
             st.info(f"🚩 **{t_info.iloc[0]['Tournament']}** （優勝：{champ}）")
             
             # ------------------------------------------------------------------
-            # 【重要】出場校リストの取得
-            # DISTINCTで「1高校1行」にまとめる。
-            # School_ID順（北から順）に並べる。
+            # 【変更点】一覧は「DB_出場成績」から取る！
+            # これが最も正しい「出場校リスト」であり、1校1行が保証される
             # ------------------------------------------------------------------
             df_res = client.query(f"""
-                SELECT DISTINCT School, School_ID, Result, History_Label
-                FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
+                SELECT School, School_ID, Rank, History_Label
+                FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
                 WHERE Year = '{sel_year}' AND Season = '{sel_season}'
                 ORDER BY School_ID ASC
             """).to_dataframe()
             
             if df_res.empty:
-                st.warning("データが見つかりません。")
+                st.warning("出場データが見つかりません。")
             else:
                 st.write(f"👇 **出場 {len(df_res)} 校** （クリックで詳細表示）")
 
-                # 欠損値補完
                 if 'History_Label' not in df_res.columns: df_res['History_Label'] = '-'
-                if 'Result' not in df_res.columns: df_res['Result'] = '-'
+                if 'Rank' not in df_res.columns: df_res['Rank'] = '-' # 出場成績ではResultではなくRankカラムの場合が多い
                 
-                # 一覧表示用
-                display_df = df_res[['School', 'History_Label', 'Result']].rename(columns={
-                    'School': '高校名', 'History_Label': '出場情報', 'Result': '成績'
+                # 一覧表示
+                display_df = df_res[['School', 'History_Label', 'Rank']].rename(columns={
+                    'School': '高校名', 'History_Label': '出場情報', 'Rank': '成績'
                 })
                 
                 selection = st.dataframe(
@@ -99,7 +94,7 @@ if mode == "🏆 大会から探す":
                     tab1, tab2, tab3 = st.tabs(["⚾ この大会の戦績", "🦁 当時のメンバー", "📜 過去の歩み"])
                     
                     with tab1:
-                        # この大会の全試合（スコア付き）
+                        # 試合スコアは「戦績データ」から取る（ここはおまけデータとして正しい使い方）
                         games_query = f"""
                             SELECT Round, Opponent, Score, Win_Loss, Game_Scores
                             FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
@@ -112,7 +107,7 @@ if mode == "🏆 大会から探す":
                             valid = {k:v for k,v in cols.items() if k in df_games.columns}
                             st.dataframe(df_games[valid.keys()].rename(columns=valid), use_container_width=True, hide_index=True)
                         except:
-                            st.write("データなし")
+                            st.write("試合データなし")
 
                     with tab2:
                         # メンバー表
@@ -130,14 +125,10 @@ if mode == "🏆 大会から探す":
                             st.warning("メンバーデータなし")
                     
                     with tab3:
-                        # -----------------------------------------------------------
-                        # 【重要】過去の履歴
-                        # DISTINCTを使って「大会ごとに1行」にする（重複排除）
-                        # 戦績データから、その大会の最終成績(Result)とHistory_Labelを取得
-                        # -----------------------------------------------------------
+                        # 過去履歴も「出場成績」から取る（重複なくスッキリ出る）
                         h_query = f"""
-                            SELECT DISTINCT Year, Season, Result, History_Label
-                            FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
+                            SELECT Year, Season, Rank, History_Label
+                            FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
                             WHERE School_ID = '{target_sid}' 
                               AND (Year < {sel_year} OR (Year = {sel_year} AND Season != '{sel_season}'))
                             ORDER BY Year DESC, Season DESC
@@ -146,11 +137,10 @@ if mode == "🏆 大会から探す":
                         try:
                             df_hist = client.query(h_query).to_dataframe()
                             if 'History_Label' not in df_hist.columns: df_hist['History_Label'] = '-'
-                            
-                            st.dataframe(df_hist.rename(columns={'Year':'年度','Season':'季','Result':'成績','History_Label':'当時の記録'}), 
+                            st.dataframe(df_hist.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'当時の記録'}), 
                                          use_container_width=True, hide_index=True)
                         except:
-                            st.info("過去の出場履歴がありません")
+                            st.info("過去の出場履歴なし")
 
 # ==========================================
 # 👤 モード: 選手検索
@@ -198,21 +188,23 @@ elif mode == "🏫 高校から探す":
     st.subheader("🏫 高校検索")
     s_in = st.text_input("高校名")
     if s_in:
-        # ID検索
         df_s = client.query(f"SELECT DISTINCT School_ID, Latest_School_Name FROM `{PROJECT_ID}.{DATASET_ID}.DB_高校マスタ` WHERE School LIKE '%{s_in}%' OR Latest_School_Name LIKE '%{s_in}%' LIMIT 20").to_dataframe()
         if not df_s.empty:
             sel = st.selectbox("選択", df_s['Latest_School_Name'].unique())
             if sel:
                 sid = df_s[df_s['Latest_School_Name']==sel].iloc[0]['School_ID']
                 
-                # ここも重複排除して一覧表示
+                # ここも「出場成績」から取る
                 h_query = f"""
-                    SELECT DISTINCT Year, Season, Result, History_Label
-                    FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
+                    SELECT Year, Season, Rank, History_Label
+                    FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
                     WHERE School_ID = '{sid}'
                     ORDER BY Year DESC, Season DESC
                 """
-                df_h = client.query(h_query).to_dataframe()
-                st.dataframe(df_h.rename(columns={'Year':'年度','Season':'季','Result':'成績','History_Label':'情報'}), use_container_width=True, hide_index=True)
+                try:
+                    df_h = client.query(h_query).to_dataframe()
+                    st.dataframe(df_h.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'情報'}), use_container_width=True, hide_index=True)
+                except:
+                    st.warning("データなし")
         else:
             st.warning("見つかりませんでした")
