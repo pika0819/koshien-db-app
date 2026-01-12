@@ -2,6 +2,7 @@ import streamlit as st
 from google.cloud import bigquery
 import pandas as pd
 
+# --- 1. 設定 ---
 st.set_page_config(page_title="高校野球DB完全版", layout="wide", page_icon="⚾")
 st.title("⚾ 高校野球 全記録データベース")
 
@@ -20,6 +21,7 @@ client = get_bq_client()
 PROJECT_ID = "koshien-db"
 DATASET_ID = "koshien_data"
 
+# --- 2. サイドバー ---
 with st.sidebar:
     st.header("📂 メニュー")
     mode = st.radio("検索モード", ["🏆 大会から探す", "👤 選手から探す", "🏫 高校から探す"])
@@ -31,7 +33,6 @@ if mode == "🏆 大会から探す":
     st.subheader("🏆 大会記録・出場校チェック")
     
     try:
-        # 大会マスタから年度取得
         df_years = client.query(f"SELECT DISTINCT Year FROM `{PROJECT_ID}.{DATASET_ID}.DB_大会マスタ` ORDER BY Year DESC").to_dataframe()
         years_list = df_years['Year'].tolist()
     except:
@@ -49,8 +50,7 @@ if mode == "🏆 大会から探す":
             st.info(f"🚩 **{t_info.iloc[0]['Tournament']}** （優勝：{champ}）")
             
             # ------------------------------------------------------------------
-            # 【変更点】一覧は「DB_出場成績」から取る！
-            # これが最も正しい「出場校リスト」であり、1校1行が保証される
+            # 【重要】一覧リストは「DB_出場成績」から取得（1校1行・History付き）
             # ------------------------------------------------------------------
             df_res = client.query(f"""
                 SELECT School, School_ID, Rank, History_Label
@@ -64,8 +64,9 @@ if mode == "🏆 大会から探す":
             else:
                 st.write(f"👇 **出場 {len(df_res)} 校** （クリックで詳細表示）")
 
+                # 欠損値補完
                 if 'History_Label' not in df_res.columns: df_res['History_Label'] = '-'
-                if 'Rank' not in df_res.columns: df_res['Rank'] = '-' # 出場成績ではResultではなくRankカラムの場合が多い
+                if 'Rank' not in df_res.columns: df_res['Rank'] = '-'
                 
                 # 一覧表示
                 display_df = df_res[['School', 'History_Label', 'Rank']].rename(columns={
@@ -94,7 +95,7 @@ if mode == "🏆 大会から探す":
                     tab1, tab2, tab3 = st.tabs(["⚾ この大会の戦績", "🦁 当時のメンバー", "📜 過去の歩み"])
                     
                     with tab1:
-                        # 試合スコアは「戦績データ」から取る（ここはおまけデータとして正しい使い方）
+                        # 戦績詳細（スコア）は「DB_戦績データ」から取得
                         games_query = f"""
                             SELECT Round, Opponent, Score, Win_Loss, Game_Scores
                             FROM `{PROJECT_ID}.{DATASET_ID}.DB_戦績データ`
@@ -125,7 +126,9 @@ if mode == "🏆 大会から探す":
                             st.warning("メンバーデータなし")
                     
                     with tab3:
-                        # 過去履歴も「出場成績」から取る（重複なくスッキリ出る）
+                        # --------------------------------------------------------
+                        # 【重要】過去の履歴も「DB_出場成績」から取得
+                        # --------------------------------------------------------
                         h_query = f"""
                             SELECT Year, Season, Rank, History_Label
                             FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
@@ -194,7 +197,7 @@ elif mode == "🏫 高校から探す":
             if sel:
                 sid = df_s[df_s['Latest_School_Name']==sel].iloc[0]['School_ID']
                 
-                # ここも「出場成績」から取る
+                # ここも「DB_出場成績」から取得
                 h_query = f"""
                     SELECT Year, Season, Rank, History_Label
                     FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
