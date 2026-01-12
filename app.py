@@ -13,18 +13,18 @@ client = get_bq_client()
 PROJECT_ID = "koshien-db"
 DATASET_ID = "koshien_data"
 
-# 右寄せCSS（背番号などの見栄え向上）
+# 右寄せCSS
 st.markdown("<style>[data-testid='stDataFrame'] td { text-align: right !important; }</style>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("🔍 選手検索")
     name_input = st.text_input("選手名", placeholder="例：古城大翔")
-    # 生成した「世代」列で検索を復活！
     year_input = st.number_input("世代（西暦）", min_value=1915, max_value=2026, value=None, step=1)
 
 if name_input or year_input:
     try:
-        # キャリア統合シートを主役に検索
+        # キャリア統合(c)には「高校」列がない前提でクエリを構成
+        # cからはPlayer_ID、名前、世代を取得し、高校名はマスタ(m)から持ってくる
         where_clauses = []
         if name_input: where_clauses.append(f"c.`名前` LIKE '%{name_input}%'")
         if year_input: where_clauses.append(f"c.`世代` = {year_input}")
@@ -32,8 +32,8 @@ if name_input or year_input:
         
         query = f"""
             SELECT DISTINCT 
-                c.`Player_ID`, c.`名前`, c.`高校`, c.`世代`,
-                m.`出身`, m.`Position`, m.`生年月日`,
+                c.`Player_ID`, c.`名前`, c.`世代`,
+                m.`高校`, m.`出身`, m.`Position`, m.`生年月日`,
                 m.`球団`, m.`ドラフト`, m.`順位`, m.`進路`,
                 m.`U12`, m.`U15`, m.`U18`, m.`U22`, m.`侍JAPAN`
             FROM `{PROJECT_ID}.{DATASET_ID}.DB_選手キャリア統合` AS c
@@ -43,8 +43,9 @@ if name_input or year_input:
         df_results = client.query(query).to_dataframe()
 
         if not df_results.empty:
-            # 校名の整形
-            df_results['高校'] = df_results['高校'].fillna('不明').replace(r'\(', '（', regex=True).replace(r'\)', '）', regex=True)
+            # マスタに校名がない場合のセーフティ（古城選手などの対応）
+            # もしキャリア側に校名が入っていそうな列（School_IDなど）があれば、それも考慮
+            df_results['高校'] = df_results['高校'].fillna('名簿外').replace(r'\(', '（', regex=True).replace(r'\)', '）', regex=True)
             df_results['display_label'] = df_results['名前'] + " （" + df_results['高校'] + "）"
             
             selected_label = st.selectbox("選手を選択", options=df_results['display_label'].tolist())
@@ -52,29 +53,26 @@ if name_input or year_input:
             if selected_label:
                 p = df_results[df_results['display_label'] == selected_label].iloc[0]
                 
-                # 高校名をリンク化（前回提案のドリルダウン準備）
-                school_display = p['高校']
-                st.markdown(f"## **{p['名前']}** （[{school_display}](/?school={school_display})）")
+                # 表示
+                st.markdown(f"## **{p['名前']}** （{p['高校']}）")
                 
-                # プロフィール（生年月日整形あり）
+                # プロフィール
                 profile_line = [f"📅 **世代:** {int(p['世代'])}年" if pd.notna(p['世代']) else "📅 **世代:** 不明"]
-                
                 if pd.notna(p.get('生年月日')):
                     try: bday = pd.to_datetime(p['生年月日']).strftime('%Y年%m月%d日')
                     except: bday = str(p['生年月日'])
                     profile_line.append(f"🎂 **生年月日:** {bday}")
-                
                 if pd.notna(p.get('出身')): profile_line.append(f"📍 **出身:** {p['出身']}")
                 st.write(" / ".join(profile_line))
 
-                # プロ入り実績（マスタにデータがある場合のみ）
+                # プロ入り実績
                 if pd.notna(p.get('球団')) and str(p['球団']) != 'None':
                     draft = [f"🚀 **{p['球団']}**"]
                     if pd.notna(p.get('ドラフト')): draft.append(f"{str(p['ドラフト']).split('.')[0]}年")
                     if pd.notna(p.get('順位')): draft.append(f"{p['順位']}位")
                     st.success(" / ".join(draft))
 
-                # 代表歴（全角カッコ対応）
+                # 代表歴（全角カッコ）
                 reps = []
                 for col in ['U12', 'U15', 'U18', 'U22', '侍JAPAN']:
                     val = str(p.get(col, '')).strip()
@@ -88,7 +86,7 @@ if name_input or year_input:
                 st.divider()
                 st.subheader("🏟️ 甲子園出場・詳細記録")
                 
-                # 出場記録の取得
+                # 出場記録
                 career_query = f"""
                     SELECT DISTINCT c.`Year`, c.`Season`, c.`学年`, mem.`背番号`, 
                            mem.`主将` as `mem_capt`, c.`主将` as `car_capt`, mem.`投打`, c.`成績`
@@ -100,7 +98,6 @@ if name_input or year_input:
                 df_career = client.query(career_query).to_dataframe()
 
                 if not df_career.empty:
-                    # ◎ 判定
                     df_career['役職'] = df_career.apply(lambda r: "★主将" if "◎" in str(r['mem_capt'])+str(r['car_capt']) else "-", axis=1)
                     st.dataframe(df_career[['Year', 'Season', '学年', '背番号', '投打', '役職', '成績']], use_container_width=True, hide_index=True)
 
