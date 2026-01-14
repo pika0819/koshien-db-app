@@ -144,9 +144,14 @@ if mode == "🏆 大会から探す":
                         try:
                             df_hist = client.query(h_query).to_dataframe()
                             if 'History_Label' not in df_hist.columns: df_hist['History_Label'] = '-'
+                            
+                            # DataFrameを表示用に整形
+                            df_display_hist = df_hist.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'当時の記録'})
+                            
                             st.dataframe(
-                                df_hist.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'当時の記録'}), 
-                                use_container_width=True, hide_index=True,
+                                df_display_hist,
+                                use_container_width=True, 
+                                hide_index=True,
                                 column_config={"年度": st.column_config.NumberColumn(format="%d")}
                             )
                         except:
@@ -205,6 +210,56 @@ elif mode == "👤 選手から探す":
                         cols = {'Year':'年度', 'Season':'季', 'Grade':'学年', 'Uniform_Number':'背番号', 'Position':'守備', 'Result_ID':'大会記録ID'}
                         valid_cols = {k:v for k,v in cols.items() if k in p_data.columns}
                         st.table(p_data[valid_cols.keys()].rename(columns=valid_cols))
+            else:
+                st.warning("該当する選手は見つかりませんでした。")
+        except Exception as e:
+            st.error(f"検索エラー: {e}")
+
+# ==========================================
+# 🏫 モード: 高校検索
+# ==========================================
+elif mode == "🏫 高校から探す":
+    st.subheader("🏫 高校検索")
+    s_in = st.text_input("高校名")
+    if s_in:
+        df_s = client.query(f"""
+            SELECT DISTINCT School_ID, Latest_School_Name, Prefecture 
+            FROM `{PROJECT_ID}.{DATASET_ID}.DB_高校マスタ` 
+            WHERE School_Name LIKE '%{s_in}%' OR Latest_School_Name LIKE '%{s_in}%' 
+            LIMIT 20
+        """).to_dataframe()
+        
+        if not df_s.empty:
+            df_s['Label'] = df_s['Latest_School_Name'] + " (" + df_s['Prefecture'] + ")"
+            sel = st.selectbox("選択", df_s['Label'].unique())
+            
+            if sel:
+                sid = df_s[df_s['Label']==sel].iloc[0]['School_ID']
+                st.markdown(f"### 📜 {sel.split(' (')[0]} の出場履歴")
+                
+                h_query = f"""
+                    SELECT Year, Season, Rank, History_Label
+                    FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
+                    WHERE School_ID = '{sid}'
+                    ORDER BY CAST(Year AS INT64) DESC, Season DESC
+                """
+                try:
+                    df_h = client.query(h_query).to_dataframe()
+                    
+                    # エラー回避のため、データフレーム定義をシンプルに記述
+                    df_display_h = df_h.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'情報'})
+                    
+                    st.dataframe(
+                        df_display_h,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"年度": st.column_config.NumberColumn(format="%d")}
+                    )
+                except:
+                    st.warning("データなし")
+        else:
+            st.warning("見つかりませんでした")
+
             else:
                 st.warning("該当する選手は見つかりませんでした。")
         except Exception as e:
