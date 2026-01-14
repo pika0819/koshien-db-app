@@ -227,7 +227,7 @@ elif mode == "👤 選手から探す":
         else:
             st.warning("該当する選手は見つかりませんでした。")
 
-# ==========================================
+# # ==========================================
 # 🏫 モード: 高校検索
 # ==========================================
 elif mode == "🏫 高校から探す":
@@ -235,10 +235,12 @@ elif mode == "🏫 高校から探す":
     s_in = st.text_input("高校名を入力してください")
     
     if s_in:
+        # 修正箇所: School_Name ではなく Latest_School_Name と Official_School_Name を検索対象に変更
         df_s = run_query(f"""
             SELECT DISTINCT School_ID, Latest_School_Name, Prefecture 
             FROM `{PROJECT_ID}.{DATASET_ID}.DB_高校マスタ` 
-            WHERE School_Name LIKE '%{s_in}%' OR Latest_School_Name LIKE '%{s_in}%' 
+            WHERE Latest_School_Name LIKE '%{s_in}%' 
+               OR Official_School_Name LIKE '%{s_in}%' 
             LIMIT 20
         """)
         
