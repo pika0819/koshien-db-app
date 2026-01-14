@@ -226,23 +226,24 @@ elif mode == "👤 選手から探す":
                     )
         else:
             st.warning("該当する選手は見つかりませんでした。")
-
-# # ==========================================
+# ==========================================
 # 🏫 モード: 高校検索
 # ==========================================
 elif mode == "🏫 高校から探す":
     st.subheader("🏫 高校検索")
-    s_in = st.text_input("高校名を入力してください")
+    s_in = st.text_input("高校名を入力してください", placeholder="例: 高松")
     
     if s_in:
-        # 修正箇所: School_Name ではなく Latest_School_Name と Official_School_Name を検索対象に変更
-        df_s = run_query(f"""
-            SELECT DISTINCT School_ID, Latest_School_Name, Prefecture 
-            FROM `{PROJECT_ID}.{DATASET_ID}.DB_高校マスタ` 
-            WHERE Latest_School_Name LIKE '%{s_in}%' 
-               OR Official_School_Name LIKE '%{s_in}%' 
-            LIMIT 20
-        """)
+        # 読み込み中の表示（ちらつき防止）
+        with st.spinner('データを検索しています...'):
+            # 修正: カラム名 School_Name ではなく Latest_School_Name / Official_School_Name で検索
+            df_s = run_query(f"""
+                SELECT DISTINCT School_ID, Latest_School_Name, Prefecture 
+                FROM `{PROJECT_ID}.{DATASET_ID}.DB_高校マスタ` 
+                WHERE Latest_School_Name LIKE '%{s_in}%' 
+                   OR Official_School_Name LIKE '%{s_in}%' 
+                LIMIT 20
+            """)
         
         if not df_s.empty:
             df_s['Label'] = df_s['Latest_School_Name'] + " (" + df_s['Prefecture'] + ")"
@@ -252,19 +253,34 @@ elif mode == "🏫 高校から探す":
                 sid = df_s[df_s['Label']==sel].iloc[0]['School_ID']
                 st.markdown(f"### 📜 {sel.split(' (')[0]} の出場履歴")
                 
-                df_h = run_query(f"""
-                    SELECT Year, Season, Rank, History_Label
-                    FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
-                    WHERE School_ID = '{sid}'
-                    ORDER BY CAST(Year AS INT64) DESC, Season DESC
-                """)
+                # 読み込み中の表示
+                with st.spinner('出場履歴を読み込んでいます...'):
+                    # 修正: 'School' (当時の校名) を取得カラムに追加
+                    df_h = run_query(f"""
+                        SELECT Year, Season, School, Rank, History_Label
+                        FROM `{PROJECT_ID}.{DATASET_ID}.DB_出場成績`
+                        WHERE School_ID = '{sid}'
+                        ORDER BY CAST(Year AS INT64) DESC, Season DESC
+                    """)
                 
                 if not df_h.empty:
+                    # カラム整理
+                    display_df = df_h.rename(columns={
+                        'Year': '年度',
+                        'Season': '季',
+                        'School': '当時の校名',  # ここに追加
+                        'Rank': '成績',
+                        'History_Label': '情報'
+                    })
+                    
                     st.dataframe(
-                        df_h.rename(columns={'Year':'年度','Season':'季','Rank':'成績','History_Label':'情報'}),
+                        display_df,
                         use_container_width=True,
                         hide_index=True,
-                        column_config={"年度": st.column_config.NumberColumn(format="%d")}
+                        column_config={
+                            "年度": st.column_config.NumberColumn(format="%d"),
+                            "当時の校名": st.column_config.TextColumn(width="medium"), # 幅を調整
+                        }
                     )
                 else:
                     st.warning("出場履歴データがありません")
