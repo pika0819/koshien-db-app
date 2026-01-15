@@ -31,11 +31,46 @@ DATASET_ID = "koshien_data"
 
 # --- 2. データ取得関数群 ---
 
-# 大会リスト取得
+# --- get_results_list 関数の修正版 ---
 @st.cache_data(ttl=600)
-def get_tournaments():
-    sql = "SELECT Tournament, Year, Season FROM `{}.{}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC".format(PROJECT_ID, DATASET_ID)
-    return client.query(sql).to_dataframe()
+def get_results_list(tournament_name):
+    # 列名を指定せず、アスタリスク(*)で全取得して、Python側で処理する
+    sql = """
+    SELECT tr.*, s.School_Name_Now
+    FROM `{0}.{1}.t_results` AS tr
+    LEFT JOIN `{0}.{1}.m_school` AS s ON tr.School_ID = s.School_ID
+    WHERE tr.Tournament = @tournament
+    """.format(PROJECT_ID, DATASET_ID)
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name)
+        ]
+    )
+    df = client.query(sql, job_config=job_config).to_dataframe()
+    
+    # 重複を排除
+    df = df.drop_duplicates()
+
+    # スプレッドシートの列名が何であっても対応できるように安全にリネーム
+    # ※もし列名が違う場合は、ここを実際のスプシの1行目の名前に合わせてください
+    rename_map = {
+        'District': '地区',
+        'School_Name_Then': '校名',
+        'School_Name_Now': '現在校名',
+        'History_Label': '出場回数',
+        'Rank': '成績'
+    }
+    
+    # 存在する列だけを抽出して表示用に加工
+    available_cols = [c for c in rename_map.keys() if c in df.columns]
+    df_display = df[available_cols].rename(columns=rename_map)
+    
+    # School_ID はドリルダウンに必要なので保持
+    if 'School_ID' in df.columns:
+        df_display['School_ID'] = df['School_ID']
+        
+    return df_display
 
 # 出場校一覧取得（重複排除済み）
 @st.cache_data(ttl=600)
