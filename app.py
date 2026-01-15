@@ -140,14 +140,16 @@ def load_tournament_details(year, season):
 # B. 選手検索
 @st.cache_data(ttl=3600)
 def search_players_list(query_text):
+    # ★修正点: MAX(Generation) as Generation を追加しました
     sql = """
-    SELECT DISTINCT Name, School_Name_Then, MAX(Year) as Last_Year
+    SELECT Name, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
     FROM `{0}.{1}.m_player`
     WHERE Name LIKE @q
     GROUP BY Name, School_Name_Then
     ORDER BY Last_Year DESC
     LIMIT 50
     """.format(PROJECT_ID, APP_DATASET_ID)
+    
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")]
     )
