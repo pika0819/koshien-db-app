@@ -241,7 +241,7 @@ if search_mode == "🏟 大会から探す":
     # リンクが存在するかチェック
     links_to_show = []
     if sel["link_year"] and sel["link_year"].startswith("http"):
-        links_to_show.append(("🔗 大会情報 (主催者)", sel["link_year"]))
+        links_to_show.append(("🔗 組み合わせ表", sel["link_year"]))
     if sel["link_hist"] and sel["link_hist"].startswith("http"):
         links_to_show.append(("🏛 甲子園歴史館", sel["link_hist"]))
     if sel["link_virt"] and sel["link_virt"].startswith("http"):
@@ -297,7 +297,7 @@ elif search_mode == "👤 選手名から探す":
     if q:
         candidates = search_players_list(q)
         if not candidates.empty:
-            candidates['label'] = candidates.apply(lambda x: f"{x['Name']} ({x['School_Name_Then']} - {x['Last_Year']}年頃)", axis=1)
+            candidates['label'] = candidates.apply(lambda x: f"{x['Name']} ({x['School_Name_Then']} - {x['Generation']}世代)", axis=1)
             selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
             
             if selected_candidate_label:
@@ -312,9 +312,10 @@ elif search_mode == "👤 選手名から探す":
                     
                     meta_info = []
                     if 'School_Name_Then' in profile: meta_info.append(f"🏫 {profile['School_Name_Then']}")
-                    if 'Birth_Date' in profile and pd.notna(profile['Birth_Date']): meta_info.append(f"🎂 {profile['Birth_Date']}")
-                    if 'Prefecture' in profile and pd.notna(profile['Prefecture']): meta_info.append(f"📍 {profile['Prefecture']}")
+                    if 'Birth_Date' in profile and pd.notna(profile['Birth_Date']): meta_info.append(f"🎂 {profile['Birth_Date']}生")
+                    if 'Hometown' in profile and pd.notna(profile['Hometown']): meta_info.append(f"📍 {profile['Hometown']}出身")
                     if 'Generation' in profile and pd.notna(profile['Generation']): meta_info.append(f"📅 {profile['Generation']}世代")
+                    if 'Career_Path' in profile and pd.notna(profile['Career_Path']): meta_info.append(f"進路情報： {profile['Career_Path']}")
                     st.markdown(f"<div class='profile-meta'>{'  |  '.join(meta_info)}</div>", unsafe_allow_html=True)
 
                     # 🚀 プロ入り情報（緑ボックス）
