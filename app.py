@@ -8,19 +8,44 @@ import google.oauth2.service_account
 st.set_page_config(page_title="甲子園DB", layout="wide", page_icon="⚾")
 st.title("⚾️ 甲子園DB")
 
-# スタイル調整
+# --- デザインCSS（修正済み） ---
 st.markdown("""
 <style>
+    /* プロ入り情報：落ち着いたグリーン */
     .pro-box {
-        padding: 15px; border-radius: 8px; background-color: #2e8b57; color: white;
-        margin-bottom: 10px; font-weight: bold; border: 1px solid #1e5b38;
+        padding: 15px; border-radius: 8px; 
+        background-color: #2F5C45; /* 彩度を落とした緑 */
+        color: white;
+        margin-bottom: 10px; font-weight: bold; border: 1px solid #448060;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
+    /* 代表経歴：侍ジャパンネイビー */
     .japan-box {
-        padding: 15px; border-radius: 8px; background-color: #DAA520; color: white;
-        margin-bottom: 10px; font-weight: bold; border: 1px solid #B8860B;
+        padding: 15px; border-radius: 8px; 
+        background-color: #0F1C3F; /* 深いネイビー */
+        color: #D4AF37; /* ゴールドの文字 */
+        margin-bottom: 10px; font-weight: bold; 
+        border: 1px solid #D4AF37;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
+    /* プロフィール詳細：読みやすい明るいグレー */
     .profile-meta {
-        color: #666; font-size: 0.9em; margin-bottom: 15px;
+        color: #cccccc !important; /* 強制的に明るくする */
+        font-size: 0.95em; 
+        margin-bottom: 20px;
+        font-family: "Helvetica Neue", Arial, sans-serif;
+    }
+    /* 選手名のスタイル */
+    .player-name-title {
+        font-size: 2.5em;
+        font-weight: bold;
+        margin-bottom: 0px;
+    }
+    .player-kana {
+        font-size: 0.5em;
+        color: #aaaaaa;
+        margin-left: 10px;
+        font-weight: normal;
     }
     /* リンクボタンのスタイル調整 */
     div[data-testid="stLinkButton"] p { font-weight: bold; }
@@ -64,7 +89,6 @@ def sync_data():
         dataset.location = "US"
         client.create_dataset(dataset)
 
-    # 同期対象テーブル
     tables = ["m_tournament", "m_school", "m_player", "t_results", "t_scores", "m_region"]
     
     for i, table_name in enumerate(tables):
@@ -93,11 +117,11 @@ def clean_and_rename(df):
         'Year': '年度', 'Season': '季節', 'Tournament': '大会名',
         'School_Name_Now': '現在校名', 'School_Name_Then': '当時の校名',
         'District': '地区', 'Prefecture': '都道府県',
-        'Uniform_Number': '背番号', 'Name': '氏名', 'Position': '守備',
+        'Uniform_Number': '背番号', 'Name': '氏名', 'Name_Kana': 'フリガナ', # カナ追加
+        'Position': '守備',
         'Grade': '学年', 'Captain': '主将', 'Pro_Team': 'プロ入団', 
         'Draft_Year': 'ドラフト年', 'Draft_Rank': '順位', 'Throw_Bat': '投打',
-        'Birth_Date': '生年月日', 'Generation': '世代', 
-        # 新しい列名
+        'Birth_Date': '生年月日', 'Generation': '世代', 'Career_Path': '進路', # 進路追加
         'U12': 'U12代表', 'U15': 'U15代表', 'U18': 'U18代表', 'U22': 'U22代表', 'JAPAN': '侍ジャパン',
         'Rank': '成績', 'Win_Loss': '勝敗', 'Score': 'スコア', 'Opponent': '対戦校',
         'Round': '回戦', 'Notes': '備考', 'History_Label': '出場回数',
@@ -140,16 +164,15 @@ def load_tournament_details(year, season):
 # B. 選手検索
 @st.cache_data(ttl=3600)
 def search_players_list(query_text):
-    # ★修正点: MAX(Generation) as Generation を追加しました
+    # Name_Kanaがあれば取得
     sql = """
-    SELECT Name, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
+    SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
     FROM `{0}.{1}.m_player`
     WHERE Name LIKE @q
     GROUP BY Name, School_Name_Then
     ORDER BY Last_Year DESC
     LIMIT 50
     """.format(PROJECT_ID, APP_DATASET_ID)
-    
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")]
     )
@@ -207,7 +230,7 @@ st.sidebar.header("🔍 検索モード")
 search_mode = st.sidebar.radio("", ["🏟 大会から探す", "👤 選手名から探す", "🏫 高校名から探す"])
 
 st.sidebar.markdown("---")
-st.sidebar.caption("※スプレッドシートの列を追加・変更した場合は、必ず下のボタンを押して反映させてください。")
+st.sidebar.caption("※列の追加・変更後は必ず更新ボタンを押してください。")
 if st.sidebar.button("🔄 データを最新に更新"):
     with st.spinner("スプレッドシートから最新データを同期中..."):
         sync_data()
@@ -221,12 +244,9 @@ if search_mode == "🏟 大会から探す":
         
     df_tourney = df_tourney.fillna('')
     tourney_map = {}
-    
-    # 選択肢データの作成
     for _, row in df_tourney.iterrows():
         y, s, t = row.get('Year', ''), row.get('Season', ''), row.get('Tournament', '')
         label = f"{y} {s} - {t}"
-        # 3種類のリンクを辞書に保持
         tourney_map[label] = {
             "year": y, "season": s, "name": t,
             "link_year": row.get('Year_Link', ''),
@@ -237,10 +257,8 @@ if search_mode == "🏟 大会から探す":
     selected_label = st.sidebar.selectbox("大会を選択", list(tourney_map.keys()))
     sel = tourney_map[selected_label]
     
-    # === 3つのリンクボタンを並べて表示 ===
     st.header(f"{selected_label}")
     
-    # リンクが存在するかチェック
     links_to_show = []
     if sel["link_year"] and sel["link_year"].startswith("http"):
         links_to_show.append(("🔗 組み合わせ表", sel["link_year"]))
@@ -286,7 +304,7 @@ if search_mode == "🏟 大会から探す":
                             my_members['Unum'] = pd.to_numeric(my_members['Uniform_Number'], errors='coerce')
                             my_members = my_members.sort_values('Unum').drop(columns=['Unum'])
                         except: pass
-                    target_cols = ['Uniform_Number', 'Position', 'Name', 'Grade', 'Captain', 'Pro_Team']
+                    target_cols = ['Uniform_Number', 'Position', 'Name', 'Name_Kana', 'Grade', 'Captain', 'Pro_Team']
                     exist_target = [c for c in target_cols if c in my_members.columns]
                     st.dataframe(clean_and_rename(my_members[exist_target]), use_container_width=True, hide_index=True)
                 else: st.info("メンバーデータなし")
@@ -294,12 +312,16 @@ if search_mode == "🏟 大会から探す":
 # === モード2: 選手検索 ===
 elif search_mode == "👤 選手名から探す":
     st.subheader("👤 選手検索")
-    q = st.text_input("選手名を入力してください", placeholder="例：松坂大輔、山田脩也")
+    q = st.text_input("選手名を入力してください", placeholder="例：松坂大輔、宮下朝陽")
     
     if q:
         candidates = search_players_list(q)
         if not candidates.empty:
-            candidates['label'] = candidates.apply(lambda x: f"{x['Name']} ({x['School_Name_Then']} - {x['Generation']}世代)", axis=1)
+            def make_label(row):
+                gen_info = f"- {row['Generation']}世代" if pd.notna(row.get('Generation')) else f"- {row['Last_Year']}年頃"
+                return f"{row['Name']} ({row['School_Name_Then']} {gen_info})"
+
+            candidates['label'] = candidates.apply(make_label, axis=1)
             selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
             
             if selected_candidate_label:
@@ -310,17 +332,40 @@ elif search_mode == "👤 選手名から探す":
                     profile = details.iloc[-1]
                     
                     st.markdown("---")
-                    st.title(f"{profile['Name']}")
                     
+                    # 氏名とフリガナの表示（HTMLでサイズ調整）
+                    kana = profile.get('Name_Kana', '')
+                    if pd.isna(kana): kana = ''
+                    st.markdown(f"""
+                        <div class='player-name-title'>
+                            {profile['Name']} <span class='player-kana'>{kana}</span>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # プロフィール情報の構築
                     meta_info = []
                     if 'School_Name_Then' in profile: meta_info.append(f"🏫 {profile['School_Name_Then']}")
-                    if 'Birth_Date' in profile and pd.notna(profile['Birth_Date']): meta_info.append(f"🎂 {profile['Birth_Date']}生")
-                    if 'Hometown' in profile and pd.notna(profile['Hometown']): meta_info.append(f"📍 {profile['Hometown']}出身")
-                    if 'Generation' in profile and pd.notna(profile['Generation']): meta_info.append(f"📅 {profile['Generation']}世代")
-                    if 'Career_Path' in profile and pd.notna(profile['Career_Path']): meta_info.append(f"進路情報： {profile['Career_Path']}")
-                    st.markdown(f"<div class='profile-meta'>{'  |  '.join(meta_info)}</div>", unsafe_allow_html=True)
+                    
+                    # 誕生日のチェック（列名: Birth_Date）
+                    if 'Birth_Date' in profile and pd.notna(profile['Birth_Date']):
+                        meta_info.append(f"🎂 {profile['Birth_Date']}")
+                    
+                    if 'Hometown' in profile and pd.notna(profile['Hometown']): 
+                        meta_info.append(f"📍 {profile['Hometown']}出身")
+                    elif 'Prefecture' in profile and pd.notna(profile['Prefecture']):
+                        # Hometownがない場合はPrefecture（高校所在地）を代用表示しない（出身地とは限らないため）
+                        pass
 
-                    # 🚀 プロ入り情報（緑ボックス）
+                    if 'Generation' in profile and pd.notna(profile['Generation']): 
+                        meta_info.append(f"📅 {profile['Generation']}世代")
+                    
+                    if 'Career_Path' in profile and pd.notna(profile['Career_Path']): 
+                        meta_info.append(f"👣 進路: {profile['Career_Path']}")
+                    
+                    # メタ情報を表示（色はCSSで#ccccccに指定済み）
+                    st.markdown(f"<div class='profile-meta'>{' &nbsp;|&nbsp; '.join(meta_info)}</div>", unsafe_allow_html=True)
+
+                    # 🚀 プロ入り情報（彩度を落とした緑）
                     if 'Pro_Team' in profile and pd.notna(profile['Pro_Team']) and profile['Pro_Team'] != '':
                         draft_info = f"{profile.get('Draft_Year', '')}年"
                         rank_info = f"{profile.get('Draft_Rank', '')}位"
@@ -330,15 +375,13 @@ elif search_mode == "👤 選手名から探す":
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # 🥇 代表経験（金ボックス）- 5つの列をまとめて表示
+                    # 🇯🇵 代表経験（紺色背景＋金文字）
                     japan_cols = ['U12', 'U15', 'U18', 'U22', 'JAPAN']
                     japan_history = []
-                    
                     for col in japan_cols:
-                        if col in profile and pd.notna(profile[col]) and str(profile[col]).strip() != '':
-                            # 列名と値をセットで表示（例: "U18: アジア選手権"）
-                            # 値が "TRUE" や "1" ではなく、大会名などが入っていると想定
-                            japan_history.append(f"{col}: {profile[col]}")
+                        val = profile.get(col)
+                        if pd.notna(val) and str(val).strip() != '' and str(val).lower() != 'nan':
+                             japan_history.append(f"{col}: {val}")
                     
                     if japan_history:
                         history_text = " / ".join(japan_history)
