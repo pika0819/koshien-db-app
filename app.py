@@ -72,7 +72,7 @@ PROJECT_ID = st.secrets["gcp_service_account"]["project_id"]
 RAW_DATASET_ID = "koshien_data"
 APP_DATASET_ID = "koshien_app"
 
-# --- 2. データ同期機能（ここだけ強化版：スキーマ変更に対応） ---
+# --- 2. データ同期機能（強力版） ---
 def sync_data():
     status_text = st.empty()
     bar = st.progress(0)
@@ -88,7 +88,7 @@ def sync_data():
     for i, table_name in enumerate(tables):
         status_text.text(f"同期中： {table_name}...")
         
-        # ★重要：テーブルを一度削除してから作り直す（列名の変更を反映させるため）
+        # ★ここが重要：古いテーブルを一度削除して、列の変更を確実に反映させる
         client.delete_table(f"{PROJECT_ID}.{APP_DATASET_ID}.{table_name}", not_found_ok=True)
         
         query = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{APP_DATASET_ID}.{table_name}` AS SELECT * FROM `{PROJECT_ID}.{RAW_DATASET_ID}.{table_name}`"
@@ -106,9 +106,10 @@ def clean_and_rename(df):
     drop_cols = ['School_ID', 'ID', 'MatchLink', 'Tournament_ID', 'Region_ID']
     df = df[[c for c in df.columns if c not in drop_cols]]
     
-    # 揺らぎ吸収
-    if 'BirthData' in df.columns: df = df.rename(columns={'BirthData': 'Birth_Date'})
-    if 'Birthdate' in df.columns: df = df.rename(columns={'Birthdate': 'Birth_Date'})
+    # ★修正：Birth_Dateの揺らぎをここで吸収
+    # DBが Birth_Date でも BirthDate でも、どちらも '生年月日' に変換するように修正
+    if 'Birth_Date' in df.columns: df = df.rename(columns={'Birth_Date': '生年月日'})
+    if 'BirthDate' in df.columns: df = df.rename(columns={'BirthDate': '生年月日'})
 
     rename_map = {
         'Year': '年度', 'Season': '季節', 'Tournament': '大会名',
@@ -117,7 +118,7 @@ def clean_and_rename(df):
         'Uniform_Number': '背番号', 'Name': '氏名', 'Name_Kana': 'フリガナ',
         'Position': '守備', 'Grade': '学年', 'Captain': '主将', 'Pro_Team': 'プロ入団', 
         'Draft_Year': 'ドラフト年', 'Draft_Rank': '順位', 'Throw_Bat': '投打',
-        'Birth_Date': '生年月日', 'Generation': '世代', 'Career_Path': '進路', 'Hometown': '出身地',
+        'Generation': '世代', 'Career_Path': '進路', 'Hometown': '出身地',
         'U12': 'U12代表', 'U15': 'U15代表', 'U18': 'U18代表', 'U22': 'U22代表', 'JAPAN': '侍ジャパン',
         'Rank': '成績', 'Win_Loss': '勝敗', 'Score': 'スコア', 'Opponent': '対戦校',
         'Round': '回戦', 'Notes': '備考', 'History_Label': '出場回数'
@@ -148,9 +149,8 @@ def load_tournament_details(year, season):
 
 @st.cache_data(ttl=3600)
 def search_players_list(query_text):
-    # シンプルかつ安全な検索に戻しました（エラー回避のため）
-    # もしGeneration列がBigQueryに存在しない場合でもエラーにならないよう、SELECT * ではなく指定カラムのみ取得したいところですが、
-    # ここは「更新ボタン」で列が同期されることを前提に、必要な列を指定します。
+    # ★修正：Generation列がまだ同期されていない場合に備えた安全策
+    # まずGenerationを含めて問い合わせてみる
     sql = f"""
     SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
     FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
@@ -160,10 +160,11 @@ def search_players_list(query_text):
     LIMIT 50
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
+    
     try:
         return client.query(sql, job_config=job_config).to_dataframe()
     except Exception:
-        # 万が一Generation列がない場合のエラー回避用フォールバック
+        # エラー（列がないなど）が出たら、Generationなしで再トライ
         sql_fallback = f"""
         SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year
         FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
@@ -251,7 +252,8 @@ elif search_mode == "👤 選手名から探す":
     if q:
         candidates = search_players_list(q)
         if not candidates.empty:
-            candidates['label'] = candidates.apply(lambda r: f"{r['Name']} （{r['School_Name_Then']} － {r['Generation'] if pd.notna(r.get('Generation')) else r['Last_Year']}世代）", axis=1)
+            # Generationがあれば表示、なければLast_Yearを表示（エラー回避）
+            candidates['label'] = candidates.apply(lambda r: f"{r['Name']} （{r['School_Name_Then']} － {r['Generation'] if 'Generation' in r and pd.notna(r['Generation']) else r['Last_Year']}世代）", axis=1)
             selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
             if selected_candidate_label:
                 sel_row = candidates[candidates['label'] == selected_candidate_label].iloc[0]
@@ -263,9 +265,11 @@ elif search_mode == "👤 選手名から探す":
                     
                     meta = []
                     if 'School_Name_Then' in profile: meta.append(f"🏫 {profile['School_Name_Then']}")
-                    # BirthData または Birth_Date を柔軟に取得
-                    bday = profile.get('Birth_Date') or profile.get('BirthData')
+                    
+                    # ★修正：Birth_DateとBirthDateの両方に対応
+                    bday = profile.get('Birth_Date') or profile.get('BirthDate')
                     if pd.notna(bday): meta.append(f"🎂 {bday}生")
+                    
                     if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
                     if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
                     if pd.notna(profile.get('Career_Path')): meta.append(f"👣 進路： {profile['Career_Path']}")
