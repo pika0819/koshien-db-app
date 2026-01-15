@@ -12,10 +12,9 @@ st.title("⚾️ 甲子園DB - 大会検索")
 @st.cache_resource
 def get_bq_client():
     try:
-        # クライアント作成時に location を指定する
+        # ロケーション指定は削除（USがデフォルトのため）
         return bigquery.Client.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            location="asia-northeast1"  # 東京リージョンを指定
+            st.secrets["gcp_service_account"]
         )
     except Exception as e:
         st.error(f"認証エラー: {e}")
@@ -23,20 +22,16 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# プロジェクトIDとデータセット名を指定
-# ※BigQueryのコンソールで表示されている名前に書き換えてください
+# --- 【重要】スクリーンショットに合わせて修正済み ---
 PROJECT_ID = st.secrets["gcp_service_account"]["project_id"]
-DATASET_ID = "koshien_db" 
-
-# テーブル参照用の接頭辞（バッククォートで囲むのがコツ）
+DATASET_ID = "koshien_data" # koshien_db から koshien_data に修正
 PREFIX = f"`{PROJECT_ID}.{DATASET_ID}"
 
 # --- 2. データ取得関数 ---
 
 @st.cache_data(ttl=600)
 def get_tournaments():
-    # m_tournament から大会名を取得
-    # Yearが文字列でも数字でもソートできるようにSAFE_CASTを使用
+    # 順序補正後の m_tournament を参照
     query = f"""
         SELECT Tournament, Year, Season 
         FROM {PREFIX}.m_tournament`
@@ -46,8 +41,7 @@ def get_tournaments():
 
 @st.cache_data(ttl=600)
 def get_results(tournament_name):
-    # t_results, m_school, m_region をJOINして詳細を取得
-    # スプシの列名に合わせてエイリアスを調整
+    # m_school, m_region とJOINして地域情報を取得
     query = f"""
         SELECT 
             tr.School_Name_Then AS 高校名,
@@ -75,8 +69,7 @@ try:
     df_tourney = get_tournaments()
 
     if not df_tourney.empty:
-        # 選択肢の作成
-        # データが欠損していても動くように fillna('') を追加
+        # 欠損値対策
         df_tourney = df_tourney.fillna('')
         tourney_options = df_tourney.apply(
             lambda x: f"{x['Year']} {x['Season']} - {x['Tournament']}", axis=1
@@ -84,10 +77,12 @@ try:
         
         selected_option = st.sidebar.selectbox("大会を選択", tourney_options)
         
-        # 大会名のみ抽出
-        selected_tourney_name = selected_option.split(" - ")[1]
+        # 文字列から大会名だけを安全に抽出
+        if " - " in selected_option:
+            selected_tourney_name = selected_option.split(" - ")[1]
+        else:
+            selected_tourney_name = selected_option
 
-        # メイン画面
         st.subheader(f"🏟 {selected_tourney_name} 出場校一覧")
         
         with st.spinner('データを読み込み中...'):
@@ -107,4 +102,3 @@ try:
 
 except Exception as e:
     st.error(f"エラーが発生しました: {e}")
-    st.info("BigQueryのテーブル名やデータセット名、プロジェクトIDが正しいか確認してください。")
