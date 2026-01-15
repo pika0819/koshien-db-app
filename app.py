@@ -4,18 +4,29 @@ from google.api_core.exceptions import NotFound
 import pandas as pd
 import google.oauth2.service_account
 
-# --- ページ設定 ---
+# --- ページ設定（必ず最初に記述） ---
 st.set_page_config(page_title="甲子園DB", layout="wide", page_icon="⚾")
-st.title("⚾️ 甲子園DB")
+
+# --- クエリパラメータによる状態管理（重要：これで戻るボタンが効くようになります） ---
+# URLから現在のパラメータを取得
+params = st.query_params
+initial_mode = params.get("mode", "top") # デフォルトはトップ
+initial_q = params.get("q", "")
+initial_year = params.get("year", "")
+initial_season = params.get("season", "")
 
 # --- デザインCSS ---
 st.markdown("""
 <style>
+    /* リンクのスタイル */
+    a { text-decoration: none; font-weight: bold; color: #1E90FF; }
+    a:hover { text-decoration: underline; color: #00BFFF; }
+    
     /* プロ入り情報：落ち着いたグリーン */
     .pro-box {
         padding: 15px; border-radius: 8px; 
         background-color: #2F5C45; 
-        color: white;
+        color: white; 
         margin-bottom: 10px; font-weight: bold; border: 1px solid #448060;
     }
     /* 代表経歴：侍ジャパンネイビー × ゴールド文字 */
@@ -26,25 +37,27 @@ st.markdown("""
         margin-bottom: 10px; font-weight: bold; 
         border: 1px solid #D4AF37;
     }
-    /* プロフィール詳細：読みやすい明るいグレー */
-    .profile-meta {
-        color: #dddddd !important; 
-        font-size: 1.0em; 
-        margin-bottom: 20px;
+    /* プロフィール詳細：タグ風スタイル */
+    .tag-link {
+        background-color: #333;
+        color: #ddd !important;
+        padding: 4px 10px;
+        border-radius: 15px;
+        font-size: 0.9em;
+        margin-right: 8px;
+        border: 1px solid #555;
+        display: inline-block;
+        transition: all 0.2s;
     }
-    /* 選手名のスタイル */
-    .player-name-title {
-        font-size: 2.5em;
-        font-weight: bold;
-        margin-bottom: 5px;
+    .tag-link:hover {
+        background-color: #555;
+        border-color: #888;
+        color: white !important;
+        text-decoration: none;
     }
-    .player-kana {
-        font-size: 0.55em;
-        color: #bbbbbb;
-        margin-left: 12px;
-        font-weight: normal;
-    }
-    /* リンクボタンのテキスト太字 */
+    
+    .player-name-title { font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }
+    .player-kana { font-size: 0.55em; color: #bbbbbb; margin-left: 12px; font-weight: normal; }
     div[data-testid="stLinkButton"] p { font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
@@ -53,14 +66,9 @@ st.markdown("""
 @st.cache_resource
 def get_bq_client():
     try:
-        scopes = [
-            "https://www.googleapis.com/auth/bigquery",
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ]
+        scopes = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
         credentials = google.oauth2.service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=scopes
+            st.secrets["gcp_service_account"], scopes=scopes
         )
         return bigquery.Client(credentials=credentials, project=credentials.project_id)
     except Exception as e:
@@ -108,7 +116,7 @@ def clean_and_rename(df):
         'Uniform_Number': '背番号', 'Name': '氏名', 'Name_Kana': 'フリガナ',
         'Position': '守備', 'Grade': '学年', 'Captain': '主将', 'Pro_Team': 'プロ入団', 
         'Draft_Year': 'ドラフト年', 'Draft_Rank': '順位', 'Throw_Bat': '投打',
-        'Birth_Date': '生年月日', 'Generation': '世代', 'Career_Path': '進路',
+        'Birth_Date': '生年月日', 'Generation': '世代', 'Career_Path': '進路', 'Hometown': '出身地',
         'U12': 'U12代表', 'U15': 'U15代表', 'U18': 'U18代表', 'U22': 'U22代表', 'JAPAN': '侍ジャパン',
         'Rank': '成績', 'Win_Loss': '勝敗', 'Score': 'スコア', 'Opponent': '対戦校',
         'Round': '回戦', 'Notes': '備考', 'History_Label': '出場回数'
@@ -138,8 +146,24 @@ def load_tournament_details(year, season):
     }
 
 @st.cache_data(ttl=3600)
-def search_players_list(query_text):
-    sql = f"SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player` WHERE Name LIKE @q GROUP BY Name, School_Name_Then ORDER BY Last_Year DESC LIMIT 50"
+def search_smart(query_text):
+    """
+    名前、高校名、出身地、世代、進路などあらゆる列から検索するスマート検索
+    """
+    # 複数のカラムに対してLIKE検索をかける
+    sql = f"""
+    SELECT DISTINCT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
+    FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
+    WHERE Name LIKE @q 
+       OR School_Name_Then LIKE @q 
+       OR Prefecture LIKE @q 
+       OR Hometown LIKE @q
+       OR CAST(Generation AS STRING) LIKE @q
+       OR Career_Path LIKE @q
+    GROUP BY Name, School_Name_Then
+    ORDER BY Last_Year DESC
+    LIMIT 100
+    """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
     return client.query(sql, job_config=job_config).to_dataframe()
 
@@ -163,79 +187,145 @@ def get_school_history_all(school_id):
 
 # --- 4. UI構築 ---
 
+st.title("⚾️ 甲子園DB")
+
+# サイドバーの状態をURLパラメータに基づいて決定
+# URLパラメータがある場合はそのモードを優先、なければデフォルト
+default_index = 0
+if initial_mode == "tournament": default_index = 0
+elif initial_mode == "player": default_index = 1
+elif initial_mode == "school": default_index = 2
+
 st.sidebar.header("🔍 検索モード")
-search_mode = st.sidebar.radio("", ["🏟 大会から探す", "👤 選手名から探す", "🏫 高校名から探す"])
+search_mode = st.sidebar.radio("", ["🏟 大会から探す", "👤 選手名・条件から探す", "🏫 高校名から探す"], index=default_index)
+
 st.sidebar.markdown("---")
+st.sidebar.caption("※列の追加・変更後は必ず更新ボタンを押してください。")
 if st.sidebar.button("🔄 データを最新に更新"):
     with st.spinner("同期中..."): sync_data()
 
-# === モード1： 大会検索 ===
+# =========================================================
+#  モード1： 大会検索 (URL: ?mode=tournament&year=...&season=...)
+# =========================================================
 if search_mode == "🏟 大会から探す":
+    # モードが切り替わったときにURLを更新
+    if initial_mode != "tournament":
+        st.query_params["mode"] = "tournament"
+    
     df_tourney = get_tournaments()
     if df_tourney.empty:
-        st.info("左下の更新ボタンを押してデータを読み込んでください。")
+        st.info("データがありません。左下の更新ボタンを押してください。")
         st.stop()
     df_tourney = df_tourney.fillna('')
-    tourney_map = {f"{r['Year']} {r['Season']} － {r['Tournament']}": {"year": r['Year'], "season": r['Season'], "name": r['Tournament'], "l1": r.get('Year_Link',''), "l2": r.get('History_Link',''), "l3": r.get('Virtual_Koshien_Link','')} for _, r in df_tourney.iterrows()}
     
-    selected_label = st.sidebar.selectbox("大会を選択", list(tourney_map.keys()))
-    sel = tourney_map[selected_label]
-    st.header(selected_label)
+    # URLパラメータで指定された大会があればそれを初期値にする
+    tourney_list = [f"{r['Year']} {r['Season']} － {r['Tournament']}" for _, r in df_tourney.iterrows()]
+    default_tourney_idx = 0
+    if initial_year and initial_season:
+        target = f"{initial_year} {initial_season}"
+        for i, t in enumerate(tourney_list):
+            if target in t:
+                default_tourney_idx = i
+                break
     
-    links = [("🔗 組み合わせ表", sel["l1"]), ("🏛 甲子園歴史館", sel["l2"]), ("📺 バーチャル高校野球", sel["l3"])]
-    valid_links = [(t, u) for t, u in links if u and str(u).startswith("http")]
-    if valid_links:
-        cols = st.columns(len(valid_links))
-        for i, (t, u) in enumerate(valid_links): cols[i].link_button(t, u)
+    selected_label = st.sidebar.selectbox("大会を選択", tourney_list, index=default_tourney_idx)
     
-    st.divider()
-    with st.spinner("データ展開中..."):
-        data = load_tournament_details(sel["year"], sel["season"])
-        df_list = data["list"]
+    # 選択された大会情報を取得
+    sel_row = None
+    for _, r in df_tourney.iterrows():
+        if f"{r['Year']} {r['Season']} － {r['Tournament']}" == selected_label:
+            sel_row = r
+            break
+            
+    if sel_row is not None:
+        # URLを現在の選択に更新（これでリロードしても同じ大会が出る）
+        st.query_params["mode"] = "tournament"
+        st.query_params["year"] = sel_row['Year']
+        st.query_params["season"] = sel_row['Season']
 
-    if not df_list.empty:
-        st.dataframe(clean_and_rename(df_list), use_container_width=True, hide_index=True)
-        st.subheader("🔽 詳細データ閲覧")
-        school_opts = dict(zip(df_list['School_Name_Then'], df_list['School_ID']))
-        selected_school = st.selectbox("高校を選択してください", list(school_opts.keys()))
-        if selected_school:
-            sid = school_opts[selected_school]
-            t1, t2 = st.tabs(["⚾️ 戦績・スコア", "👥 登録メンバー"])
-            with t1:
-                df_s = data["scores"][data["scores"]['School_ID'] == sid]
-                if not df_s.empty: st.dataframe(clean_and_rename(df_s[['Round', 'Opponent', 'Win_Loss', 'Score', 'Notes']]), use_container_width=True, hide_index=True)
-                else: st.info("データなし")
-            with t2:
-                df_m = data["members"][data["members"]['School_ID'] == sid]
-                if not df_m.empty:
-                    df_m = df_m.sort_values('Uniform_Number', key=lambda x: pd.to_numeric(x, errors='coerce'))
-                    st.dataframe(clean_and_rename(df_m[['Uniform_Number', 'Position', 'Name', 'Name_Kana', 'Grade', 'Captain', 'Pro_Team']]), use_container_width=True, hide_index=True)
-                else: st.info("データなし")
+        st.header(selected_label)
+        
+        # リンクボタン
+        l1, l2, l3 = sel_row.get('Year_Link'), sel_row.get('History_Link'), sel_row.get('Virtual_Koshien_Link')
+        links = [("🔗 組み合わせ表", l1), ("🏛 甲子園歴史館", l2), ("📺 バーチャル高校野球", l3)]
+        valid_links = [(t, u) for t, u in links if u and str(u).startswith("http")]
+        if valid_links:
+            cols = st.columns(len(valid_links))
+            for i, (t, u) in enumerate(valid_links): cols[i].link_button(t, u)
+        
+        st.divider()
+        with st.spinner("データ展開中..."):
+            data = load_tournament_details(sel_row["Year"], sel_row["Season"])
+            df_list = data["list"]
 
-# === モード2： 選手検索 ===
-elif search_mode == "👤 選手名から探す":
+        if not df_list.empty:
+            st.dataframe(clean_and_rename(df_list), use_container_width=True, hide_index=True)
+            st.subheader("🔽 詳細データ閲覧")
+            school_opts = dict(zip(df_list['School_Name_Then'], df_list['School_ID']))
+            selected_school = st.selectbox("高校を選択してください", list(school_opts.keys()))
+            if selected_school:
+                sid = school_opts[selected_school]
+                t1, t2 = st.tabs(["⚾️ 戦績・スコア", "👥 登録メンバー"])
+                with t1:
+                    df_s = data["scores"][data["scores"]['School_ID'] == sid]
+                    if not df_s.empty: st.dataframe(clean_and_rename(df_s[['Round', 'Opponent', 'Win_Loss', 'Score', 'Notes']]), use_container_width=True, hide_index=True)
+                    else: st.info("データなし")
+                with t2:
+                    df_m = data["members"][data["members"]['School_ID'] == sid]
+                    if not df_m.empty:
+                        df_m = df_m.sort_values('Uniform_Number', key=lambda x: pd.to_numeric(x, errors='coerce'))
+                        st.dataframe(clean_and_rename(df_m[['Uniform_Number', 'Position', 'Name', 'Name_Kana', 'Grade', 'Captain', 'Pro_Team']]), use_container_width=True, hide_index=True)
+                    else: st.info("データなし")
+
+# =========================================================
+#  モード2： 選手検索 (URL: ?mode=player&q=...)
+# =========================================================
+elif search_mode == "👤 選手名・条件から探す":
     st.subheader("👤 選手検索")
-    q = st.text_input("選手名を入力してください", placeholder="例：松坂大輔、宮下朝陽")
+    
+    # URLパラメータがあればそれを検索ボックスの初期値にする
+    default_q = initial_q if initial_mode == "player" else ""
+    q = st.text_input("選手名、高校名、出身地、世代などで検索", value=default_q, placeholder="例：松坂大輔、千葉、1980")
+    
     if q:
-        candidates = search_players_list(q)
+        # 検索実行時はURLを更新
+        st.query_params["mode"] = "player"
+        st.query_params["q"] = q
+        
+        candidates = search_smart(q)
         if not candidates.empty:
             candidates['label'] = candidates.apply(lambda r: f"{r['Name']} （{r['School_Name_Then']} － {r['Generation'] if pd.notna(r['Generation']) else r['Last_Year']}世代）", axis=1)
             selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
+            
             if selected_candidate_label:
                 sel_row = candidates[candidates['label'] == selected_candidate_label].iloc[0]
                 details = get_player_detail(sel_row['Name'], sel_row['School_Name_Then'])
+                
                 if not details.empty:
                     profile = details.iloc[-1]
                     kana = f"（{profile['Name_Kana']}）" if pd.notna(profile.get('Name_Kana')) else ""
                     st.markdown(f"<div class='player-name-title'>{profile['Name']}<span class='player-kana'>{kana}</span></div>", unsafe_allow_html=True)
                     
-                    meta = []
-                    if 'School_Name_Then' in profile: meta.append(f"🏫 {profile['School_Name_Then']}")
-                    if pd.notna(profile.get('Birth_Date')): meta.append(f"🎂 {profile['Birth_Date']}生")
-                    if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
-                    if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
-                    if pd.notna(profile.get('Career_Path')): meta.append(f"👣 進路： {profile['Career_Path']}")
-                    st.markdown(f"<div class='profile-meta'>{'　|　'.join(meta)}</div>", unsafe_allow_html=True)
+                    # --- クリッカブルなメタ情報（タグ）の構築 ---
+                    # 自身のページへのリンクとして機能し、URLパラメータを書き換えてリロードさせる
+                    meta_html = []
+                    
+                    def make_tag(label, value):
+                        if pd.isna(value) or str(value) == '': return ""
+                        # クリックすると ?mode=player&q=値 に飛ぶリンク（target="_self"で同じタブ内遷移）
+                        return f"<a href='./?mode=player&q={value}' target='_self' class='tag-link'>{label} {value}</a>"
+
+                    if 'School_Name_Then' in profile: meta_html.append(make_tag("🏫", profile['School_Name_Then']))
+                    if pd.notna(profile.get('Hometown')): meta_html.append(make_tag("📍", profile['Hometown']))
+                    elif pd.notna(profile.get('Prefecture')): meta_html.append(make_tag("📍", profile['Prefecture']))
+                    
+                    if pd.notna(profile.get('Generation')): meta_html.append(make_tag("📅", f"{profile['Generation']}世代"))
+                    if pd.notna(profile.get('Career_Path')): meta_html.append(make_tag("👣", profile['Career_Path']))
+
+                    # 生年月日は検索しても仕方ないのでテキスト表示のみ
+                    if pd.notna(profile.get('Birth_Date')): meta_html.append(f"<span style='color:#ccc; font-size:0.9em; margin-left:5px;'>🎂 {profile['Birth_Date']}生</span>")
+
+                    st.markdown(f"<div style='margin-bottom:15px;'>{' '.join(meta_html)}</div>", unsafe_allow_html=True)
 
                     if pd.notna(profile.get('Pro_Team')) and profile['Pro_Team'] != '':
                         st.markdown(f"<div class='pro-box'>🚀 NPB入団： {profile['Pro_Team']} （{profile.get('Draft_Year','')}年 {profile.get('Draft_Rank','')}位）</div>", unsafe_allow_html=True)
@@ -244,15 +334,47 @@ elif search_mode == "👤 選手名から探す":
                     if japan_h: st.markdown(f"<div class='japan-box'>🇯🇵 代表経歴： {' ／ '.join(japan_h)}</div>", unsafe_allow_html=True)
 
                     st.subheader("🏟 甲子園 出場記録")
-                    cols = ['Year', 'Season', 'Grade', 'Uniform_Number', 'Position', 'Throw_Bat', 'Tournament_Rank']
-                    st.dataframe(clean_and_rename(details[[c for c in cols if c in details.columns]]), use_container_width=True, hide_index=True)
+                    
+                    # データフレームにリンク列を追加して表示
+                    df_display = clean_and_rename(details)
+                    
+                    # 大会へのリンクを作成（YearとSeasonを使ってURLを構築）
+                    # LinkColumnを使うため、DataFrameにURL列を追加する
+                    if 'Year' in details.columns and 'Season' in details.columns:
+                        df_display['詳細'] = details.apply(lambda r: f"./?mode=tournament&year={r['Year']}&season={r['Season']}", axis=1)
+                        
+                        # 列の並び替え
+                        cols = ['詳細', '年度', '季節', '学年', '背番号', '守備', '投打', '成績']
+                        df_final = df_display[[c for c in cols if c in df_display.columns]]
+                        
+                        st.dataframe(
+                            df_final, 
+                            use_container_width=True, 
+                            hide_index=True,
+                            column_config={
+                                "詳細": st.column_config.LinkColumn(
+                                    "🔗", display_text="移動" # アイコン表示
+                                )
+                            }
+                        )
+                    else:
+                        st.dataframe(df_display, use_container_width=True, hide_index=True)
+                        
                 else: st.error("データなし")
+        else: st.warning("該当なし")
 
-# === モード3： 高校検索 ===
+# =========================================================
+#  モード3： 高校検索 (URL: ?mode=school&q=...)
+# =========================================================
 elif search_mode == "🏫 高校名から探す":
     st.subheader("🏫 高校検索")
-    q = st.text_input("高校名を入力")
+    default_q = initial_q if initial_mode == "school" else ""
+    q = st.text_input("高校名を入力", value=default_q)
+    
     if q:
+        st.query_params["mode"] = "school"
+        st.query_params["q"] = q
+        
         res = search_schools(q)
         if not res.empty:
             res['label'] = res.apply(lambda x: f"{x['School_Name_Now']} （{x['Prefecture']}）", axis=1)
@@ -261,3 +383,4 @@ elif search_mode == "🏫 高校名から探す":
             st.divider()
             st.markdown(f"### 📜 {school_select} の成績")
             st.dataframe(clean_and_rename(get_school_history_all(sid)), use_container_width=True, hide_index=True)
+        else: st.warning("見つかりませんでした")
