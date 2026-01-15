@@ -119,6 +119,14 @@ def get_history_and_alumni(school_id):
 # --- 3. UI構築 ---
 
 st.sidebar.header("🔍 設定")
+
+# ★追加：ここから
+if st.sidebar.button("🔄 データを最新に更新"):
+    st.cache_data.clear()  # キャッシュを全消去
+    st.rerun()             # 画面をリロード
+# ★追加：ここまで
+
+
 df_tourney = get_tournaments()
 
 if not df_tourney.empty:
