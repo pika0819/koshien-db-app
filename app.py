@@ -39,7 +39,6 @@ st.markdown("""
     }
     .player-kana {
         font-size: 0.55em;
-        color: #bbbbbb;
         margin-left: 12px;
         font-weight: normal;
     }
