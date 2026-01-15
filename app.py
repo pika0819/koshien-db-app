@@ -34,28 +34,29 @@ DATASET_ID = "koshien_data"
 # 大会リスト取得
 @st.cache_data(ttl=600)
 def get_tournaments():
+    # 全列取得し、重複を排除
     sql = "SELECT * FROM `{}.{}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC".format(PROJECT_ID, DATASET_ID)
-    return client.query(sql).to_dataframe()
+    df = client.query(sql).to_dataframe().drop_duplicates()
+    return df
 
 # 出場校一覧取得
 @st.cache_data(ttl=600)
 def get_results_list(tournament_name):
-    # 列名エラーを避けるため SELECT * で取得
+    # 【重要】空白や表記揺れ対策として TRIM を入れ、確実に比較する
     sql = """
     SELECT tr.*, s.School_Name_Now
     FROM `{0}.{1}.t_results` AS tr
     LEFT JOIN `{0}.{1}.m_school` AS s ON tr.School_ID = s.School_ID
-    WHERE tr.Tournament = @tournament
+    WHERE TRIM(tr.Tournament) = @tournament
     """.format(PROJECT_ID, DATASET_ID)
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name)]
+        query_parameters=[bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name.strip())]
     )
     df = client.query(sql, job_config=job_config).to_dataframe()
     df = df.drop_duplicates()
 
-    # 表示したい項目と、実際のスプシの列名のマッピング（ズレに強い設計）
-    # ※もしエラーが出る場合は、この左側の名前がスプシ1行目と合っているか確認
+    # スプシの列名に応じたマッピング
     rename_map = {
         'District': '地区',
         'School_Name_Then': '校名',
@@ -64,7 +65,6 @@ def get_results_list(tournament_name):
         'Rank': '成績'
     }
     
-    # 存在する列だけを抽出
     available_cols = [c for c in rename_map.keys() if c in df.columns]
     df_display = df[available_cols].rename(columns=rename_map)
     if 'School_ID' in df.columns:
@@ -72,20 +72,19 @@ def get_results_list(tournament_name):
         
     return df_display
 
-# 詳細データ取得
+# 詳細データ取得（各タブ用）
 @st.cache_data(ttl=600)
 def get_school_details(school_id, tournament_name):
-    # 各テーブルからデータを取得
     queries = {
-        "scores": "SELECT * FROM `{0}.{1}.t_scores` WHERE Tournament = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
-        "members": "SELECT * FROM `{0}.{1}.m_player` WHERE Tournament = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
+        "scores": "SELECT * FROM `{0}.{1}.t_scores` WHERE TRIM(Tournament) = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
+        "members": "SELECT * FROM `{0}.{1}.m_player` WHERE TRIM(Tournament) = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
         "history": "SELECT * FROM `{0}.{1}.t_results` WHERE School_ID = @school_id ORDER BY SAFE_CAST(Year AS INT64) DESC".format(PROJECT_ID, DATASET_ID),
-        "alumni": "SELECT * FROM `{0}.{1}.m_player` WHERE School_ID = @school_id AND Pro_Team IS NOT NULL".format(PROJECT_ID, DATASET_ID)
+        "alumni": "SELECT * FROM `{0}.{1}.m_player` WHERE School_ID = @school_id AND (Pro_Team IS NOT NULL AND Pro_Team != '')".format(PROJECT_ID, DATASET_ID)
     }
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name),
+            bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name.strip()),
             bigquery.ScalarQueryParameter("school_id", "STRING", school_id)
         ]
     )
@@ -101,13 +100,17 @@ st.sidebar.header("🔍 設定")
 df_tourney = get_tournaments()
 
 if not df_tourney.empty:
-    df_tourney = df_tourney.fillna('')
-    # スプシの列名が 'Tournament' か確認
+    # 列名の存在確認
     t_col = 'Tournament' if 'Tournament' in df_tourney.columns else df_tourney.columns[0]
     y_col = 'Year' if 'Year' in df_tourney.columns else df_tourney.columns[1]
+    s_col = 'Season' if 'Season' in df_tourney.columns else df_tourney.columns[2]
     
-    tourney_options = ["{} - {}".format(row[y_col], row[t_col]) for _, row in df_tourney.iterrows()]
+    # 選択肢の作成
+    df_tourney = df_tourney.fillna('')
+    tourney_options = ["{} {} - {}".format(row[y_col], row[s_col], row[t_col]) for _, row in df_tourney.iterrows()]
     selected_option = st.sidebar.selectbox("大会を選択", tourney_options)
+    
+    # 「 - 」で分割して「大会名」だけを正確に取り出す
     selected_tourney_name = selected_option.split(" - ")[1]
 else:
     st.error("大会データが取得できません")
@@ -116,19 +119,22 @@ else:
 # メイン画面
 st.subheader(f"🏟 {selected_tourney_name} 出場校一覧")
 
+# デバッグ用（表示を確認したらコメントアウトしてください）
+# st.write(f"検索キー: 『{selected_tourney_name}』")
+
 df_list = get_results_list(selected_tourney_name)
 
 if not df_list.empty:
-    # 一覧表示
+    # 一覧表示（存在する列のみ）
     display_cols = [c for c in ["地区", "校名", "現在校名", "出場回数", "成績"] if c in df_list.columns]
     st.dataframe(df_list[display_cols], use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.write("🔽 **詳細を見たい高校を選択してください**")
     
-    school_options = {row['校名']: row['School_ID'] for _, row in df_list.iterrows() if '校名' in df_list.columns and 'School_ID' in df_list.columns}
-    
-    if school_options:
+    # 「校名」と「School_ID」のペアを作成
+    if '校名' in df_list.columns and 'School_ID' in df_list.columns:
+        school_options = dict(zip(df_list['校名'], df_list['School_ID']))
         selected_school_name = st.selectbox("高校を選択", list(school_options.keys()))
         school_id = school_options[selected_school_name]
         
@@ -138,12 +144,21 @@ if not df_list.empty:
         tab1, tab2, tab3, tab4 = st.tabs(["⚾️ 戦績", "👥 メンバー", "📜 過去成績", "🌟 卒業生"])
         
         with tab1: # 戦績 (t_scores)
-            st.dataframe(details["scores"], use_container_width=True, hide_index=True)
+            if not details["scores"].empty:
+                st.dataframe(details["scores"], use_container_width=True, hide_index=True)
+            else:
+                st.info("この大会の戦績データはありません。")
         with tab2: # メンバー (m_player)
-            st.dataframe(details["members"], use_container_width=True, hide_index=True)
+            if not details["members"].empty:
+                st.dataframe(details["members"], use_container_width=True, hide_index=True)
+            else:
+                st.info("この大会のメンバーデータはありません。")
         with tab3: # 過去成績 (t_results)
             st.dataframe(details["history"], use_container_width=True, hide_index=True)
         with tab4: # 卒業生 (m_player)
-            st.dataframe(details["alumni"], use_container_width=True, hide_index=True)
+            if not details["alumni"].empty:
+                st.dataframe(details["alumni"], use_container_width=True, hide_index=True)
+            else:
+                st.info("プロ入りした卒業生データはありません。")
 else:
-    st.warning("データが見つかりませんでした。")
+    st.warning(f"「{selected_tourney_name}」のデータが見つかりませんでした。スプレッドシートのTournament列の表記を確認してください。")
