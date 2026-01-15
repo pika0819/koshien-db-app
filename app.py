@@ -28,7 +28,6 @@ st.markdown("""
     }
     /* プロフィール詳細：読みやすい明るいグレー */
     .profile-meta {
-        color: #dddddd !important; 
         font-size: 1.0em; 
         margin-bottom: 20px;
     }
