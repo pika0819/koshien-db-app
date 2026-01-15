@@ -31,10 +31,16 @@ DATASET_ID = "koshien_data"
 
 # --- 2. データ取得関数群 ---
 
-# --- get_results_list 関数の修正版 ---
+# 大会リスト取得
+@st.cache_data(ttl=600)
+def get_tournaments():
+    sql = "SELECT * FROM `{}.{}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC".format(PROJECT_ID, DATASET_ID)
+    return client.query(sql).to_dataframe()
+
+# 出場校一覧取得
 @st.cache_data(ttl=600)
 def get_results_list(tournament_name):
-    # 列名を指定せず、アスタリスク(*)で全取得して、Python側で処理する
+    # 列名エラーを避けるため SELECT * で取得
     sql = """
     SELECT tr.*, s.School_Name_Now
     FROM `{0}.{1}.t_results` AS tr
@@ -43,17 +49,13 @@ def get_results_list(tournament_name):
     """.format(PROJECT_ID, DATASET_ID)
     
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name)
-        ]
+        query_parameters=[bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name)]
     )
     df = client.query(sql, job_config=job_config).to_dataframe()
-    
-    # 重複を排除
     df = df.drop_duplicates()
 
-    # スプレッドシートの列名が何であっても対応できるように安全にリネーム
-    # ※もし列名が違う場合は、ここを実際のスプシの1行目の名前に合わせてください
+    # 表示したい項目と、実際のスプシの列名のマッピング（ズレに強い設計）
+    # ※もしエラーが出る場合は、この左側の名前がスプシ1行目と合っているか確認
     rename_map = {
         'District': '地区',
         'School_Name_Then': '校名',
@@ -62,77 +64,24 @@ def get_results_list(tournament_name):
         'Rank': '成績'
     }
     
-    # 存在する列だけを抽出して表示用に加工
+    # 存在する列だけを抽出
     available_cols = [c for c in rename_map.keys() if c in df.columns]
     df_display = df[available_cols].rename(columns=rename_map)
-    
-    # School_ID はドリルダウンに必要なので保持
     if 'School_ID' in df.columns:
         df_display['School_ID'] = df['School_ID']
         
     return df_display
 
-# 出場校一覧取得（重複排除済み）
-@st.cache_data(ttl=600)
-def get_results_list(tournament_name):
-    # マスタ結合による重複を防ぐため DISTINCT を使用
-    # 表示用と検索用（ID）を取得
-    sql = """
-    SELECT DISTINCT
-        tr.District AS 地区,
-        tr.School_Name_Then AS 校名,
-        s.School_Name_Now AS 現在校名,
-        tr.History_Label AS 出場回数,
-        tr.Rank AS 成績,
-        tr.School_ID  -- ドリルダウン用
-    FROM `{0}.{1}.t_results` AS tr
-    LEFT JOIN `{0}.{1}.m_school` AS s ON tr.School_ID = s.School_ID
-    WHERE tr.Tournament = @tournament
-    ORDER BY tr.District, tr.School_Name_Then
-    """.format(PROJECT_ID, DATASET_ID)
-    
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("tournament", "STRING", tournament_name)
-        ]
-    )
-    return client.query(sql, job_config=job_config).to_dataframe()
-
-# 詳細データ取得関数（キャッシュ活用）
+# 詳細データ取得
 @st.cache_data(ttl=600)
 def get_school_details(school_id, tournament_name):
-    # 1. この大会の戦績 (t_scores)
-    sql_scores = """
-        SELECT MatchLink, Round, Win_Loss, Score, Opponent, Notes
-        FROM `{0}.{1}.t_scores`
-        WHERE Tournament = @tournament AND School_ID = @school_id
-        ORDER BY Round
-    """.format(PROJECT_ID, DATASET_ID)
-    
-    # 2. 当時のメンバー (m_player)
-    sql_members = """
-        SELECT Uniform_Number, Position, Name, Grade, Captain
-        FROM `{0}.{1}.m_player`
-        WHERE Tournament = @tournament AND School_ID = @school_id
-        ORDER BY SAFE_CAST(Uniform_Number AS INT64)
-    """.format(PROJECT_ID, DATASET_ID)
-
-    # 3. 過去の成績 (t_results) - 最新5件
-    sql_history = """
-        SELECT Year, Season, Tournament, School_Name_Then, Rank
-        FROM `{0}.{1}.t_results`
-        WHERE School_ID = @school_id AND Tournament != @tournament
-        ORDER BY SAFE_CAST(Year AS INT64) DESC
-        LIMIT 10
-    """.format(PROJECT_ID, DATASET_ID)
-
-    # 4. 卒業生/プロ入り (m_player) - サンプル
-    sql_alumni = """
-        SELECT DISTINCT Name, Pro_Team, Draft_Year
-        FROM `{0}.{1}.m_player`
-        WHERE School_ID = @school_id AND Pro_Team IS NOT NULL
-        ORDER BY Draft_Year DESC
-    """.format(PROJECT_ID, DATASET_ID)
+    # 各テーブルからデータを取得
+    queries = {
+        "scores": "SELECT * FROM `{0}.{1}.t_scores` WHERE Tournament = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
+        "members": "SELECT * FROM `{0}.{1}.m_player` WHERE Tournament = @tournament AND School_ID = @school_id".format(PROJECT_ID, DATASET_ID),
+        "history": "SELECT * FROM `{0}.{1}.t_results` WHERE School_ID = @school_id ORDER BY SAFE_CAST(Year AS INT64) DESC".format(PROJECT_ID, DATASET_ID),
+        "alumni": "SELECT * FROM `{0}.{1}.m_player` WHERE School_ID = @school_id AND Pro_Team IS NOT NULL".format(PROJECT_ID, DATASET_ID)
+    }
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -141,24 +90,25 @@ def get_school_details(school_id, tournament_name):
         ]
     )
 
-    return {
-        "scores": client.query(sql_scores, job_config=job_config).to_dataframe(),
-        "members": client.query(sql_members, job_config=job_config).to_dataframe(),
-        "history": client.query(sql_history, job_config=job_config).to_dataframe(),
-        "alumni": client.query(sql_alumni, job_config=job_config).to_dataframe()
-    }
+    results = {}
+    for key, sql in queries.items():
+        results[key] = client.query(sql, job_config=job_config).to_dataframe().drop_duplicates()
+    return results
 
 # --- 3. UI構築 ---
 
-# サイドバー：大会選択
 st.sidebar.header("🔍 設定")
 df_tourney = get_tournaments()
 
 if not df_tourney.empty:
     df_tourney = df_tourney.fillna('')
-    tourney_options = ["{} {} - {}".format(row['Year'], row['Season'], row['Tournament']) for _, row in df_tourney.iterrows()]
+    # スプシの列名が 'Tournament' か確認
+    t_col = 'Tournament' if 'Tournament' in df_tourney.columns else df_tourney.columns[0]
+    y_col = 'Year' if 'Year' in df_tourney.columns else df_tourney.columns[1]
+    
+    tourney_options = ["{} - {}".format(row[y_col], row[t_col]) for _, row in df_tourney.iterrows()]
     selected_option = st.sidebar.selectbox("大会を選択", tourney_options)
-    selected_tourney_name = selected_option.split(" - ")[1] if " - " in selected_option else selected_option
+    selected_tourney_name = selected_option.split(" - ")[1]
 else:
     st.error("大会データが取得できません")
     st.stop()
@@ -166,60 +116,34 @@ else:
 # メイン画面
 st.subheader(f"🏟 {selected_tourney_name} 出場校一覧")
 
-# 一覧取得
 df_list = get_results_list(selected_tourney_name)
 
 if not df_list.empty:
-    # ユーザーが選択するためのUI（セレクトボックス）
-    # 表形式で見せた上で、下で選ばせるスタイル
-    st.dataframe(
-        df_list[["地区", "校名", "現在校名", "出場回数", "成績"]], 
-        use_container_width=True, 
-        hide_index=True
-    )
+    # 一覧表示
+    display_cols = [c for c in ["地区", "校名", "現在校名", "出場回数", "成績"] if c in df_list.columns]
+    st.dataframe(df_list[display_cols], use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.write("🔽 **詳細を見たい高校を選択してください**")
     
-    # 校名とIDを紐付けて選択肢作成
-    school_options = {row['校名']: row['School_ID'] for _, row in df_list.iterrows()}
-    selected_school_name = st.selectbox("高校を選択", list(school_options.keys()))
+    school_options = {row['校名']: row['School_ID'] for _, row in df_list.iterrows() if '校名' in df_list.columns and 'School_ID' in df_list.columns}
     
-    if selected_school_name:
+    if school_options:
+        selected_school_name = st.selectbox("高校を選択", list(school_options.keys()))
         school_id = school_options[selected_school_name]
         
-        # 詳細データの取得
-        with st.spinner(f'{selected_school_name} のデータを分析中...'):
+        with st.spinner(f'{selected_school_name} のデータを取得中...'):
             details = get_school_details(school_id, selected_tourney_name)
         
-        st.header(f"🏫 {selected_school_name} の詳細")
+        tab1, tab2, tab3, tab4 = st.tabs(["⚾️ 戦績", "👥 メンバー", "📜 過去成績", "🌟 卒業生"])
         
-        # タブで切り替え
-        tab1, tab2, tab3, tab4 = st.tabs(["⚾️ この大会の戦績", "👥 当時のメンバー", "📜 過去の成績", "🌟 主なOB（プロ）"])
-        
-        with tab1:
-            if not details["scores"].empty:
-                st.dataframe(details["scores"], use_container_width=True, hide_index=True)
-            else:
-                st.info("戦績データがありません")
-                
-        with tab2:
-            if not details["members"].empty:
-                st.dataframe(details["members"], use_container_width=True, hide_index=True)
-            else:
-                st.info("メンバーデータがありません")
-                
-        with tab3:
-            if not details["history"].empty:
-                st.dataframe(details["history"], use_container_width=True, hide_index=True)
-            else:
-                st.info("過去の出場データがありません")
-
-        with tab4:
-            if not details["alumni"].empty:
-                st.dataframe(details["alumni"], use_container_width=True, hide_index=True)
-            else:
-                st.info("プロ入りしたOBデータは見つかりませんでした")
-
+        with tab1: # 戦績 (t_scores)
+            st.dataframe(details["scores"], use_container_width=True, hide_index=True)
+        with tab2: # メンバー (m_player)
+            st.dataframe(details["members"], use_container_width=True, hide_index=True)
+        with tab3: # 過去成績 (t_results)
+            st.dataframe(details["history"], use_container_width=True, hide_index=True)
+        with tab4: # 卒業生 (m_player)
+            st.dataframe(details["alumni"], use_container_width=True, hide_index=True)
 else:
-    st.warning("この大会の出場校データが見つかりませんでした。")
+    st.warning("データが見つかりませんでした。")
