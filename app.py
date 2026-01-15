@@ -108,7 +108,7 @@ def clean_and_rename(df):
         'Uniform_Number': '背番号', 'Name': '氏名', 'Name_Kana': 'フリガナ',
         'Position': '守備', 'Grade': '学年', 'Captain': '主将', 'Pro_Team': 'プロ入団', 
         'Draft_Year': 'ドラフト年', 'Draft_Rank': '順位', 'Throw_Bat': '投打',
-        'Birth_Date': '生年月日', 'Generation': '世代', 'Career_Path': '進路',
+        'BirthDate': '生年月日', 'Generation': '世代', 'Career_Path': '進路',
         'U12': 'U12代表', 'U15': 'U15代表', 'U18': 'U18代表', 'U22': 'U22代表', 'JAPAN': '侍ジャパン',
         'Rank': '成績', 'Win_Loss': '勝敗', 'Score': 'スコア', 'Opponent': '対戦校',
         'Round': '回戦', 'Notes': '備考', 'History_Label': '出場回数'
@@ -231,7 +231,7 @@ elif search_mode == "👤 選手名から探す":
                     
                     meta = []
                     if 'School_Name_Then' in profile: meta.append(f"🏫 {profile['School_Name_Then']}")
-                    if pd.notna(profile.get('Birth_Date')): meta.append(f"🎂 {profile['Birth_Date']}生")
+                    if pd.notna(profile.get('BirthDate')): meta.append(f"🎂 {profile['BirthDate']}生")
                     if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
                     if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
                     if pd.notna(profile.get('Career_Path')): meta.append(f"👣 進路： {profile['Career_Path']}")
