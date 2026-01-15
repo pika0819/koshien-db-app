@@ -12,9 +12,10 @@ st.title("⚾️ 甲子園DB - 大会検索")
 @st.cache_resource
 def get_bq_client():
     try:
-        # Secretsからサービスアカウント情報を読み込み
+        # クライアント作成時に location を指定する
         return bigquery.Client.from_service_account_info(
-            st.secrets["gcp_service_account"]
+            st.secrets["gcp_service_account"],
+            location="asia-northeast1"  # 東京リージョンを指定
         )
     except Exception as e:
         st.error(f"認証エラー: {e}")
