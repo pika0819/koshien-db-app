@@ -1,351 +1,300 @@
 import streamlit as st
-import pandas as pd
 from google.cloud import bigquery
+from google.api_core.exceptions import NotFound
+import pandas as pd
+import google.oauth2.service_account
 
-# -----------------------------------------------------------------------------
-# 1. 設定 & デザイン (Config & CSS)
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="KOSHIEN DB - 高校野球データベース",
-    page_icon="⚾",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- ページ設定 ---
+st.set_page_config(page_title="甲子園DB", layout="wide", page_icon="⚾")
+st.title("⚾️ 甲子園DB")
 
-# カスタムCSS: 甲子園カラー (白, 深緑, 土色) と カードデザイン
+# --- デザインCSS ---
 st.markdown("""
 <style>
-    /* 全体のフォントと背景 */
-    .stApp {
-        background-color: #f9f9f9;
-        font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif;
+    /* プロ入り情報：落ち着いたグリーン */
+    .pro-box {
+        padding: 15px; border-radius: 8px; 
+        background-color: #2F5C45; 
+        color: white;
+        margin-bottom: 10px; font-weight: bold; border: 1px solid #448060;
     }
-    
-    /* ヘッダーの装飾 */
-    h1, h2, h3 {
-        color: #1b4d3e; /* 甲子園のフェンス色 */
-        font-weight: 700;
+    /* 代表経歴：侍ジャパンネイビー × ゴールド文字 */
+    .japan-box {
+        padding: 15px; border-radius: 8px; 
+        background-color: #0F1C3F; 
+        color: #D4AF37; 
+        margin-bottom: 10px; font-weight: bold; 
+        border: 1px solid #D4AF37;
     }
-    
-    /* カード風コンテナ */
-    .info-card {
-        background-color: #ffffff;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    /* プロフィール詳細：読みやすい明るいグレー */
+    .profile-meta {
+        font-size: 1.0em; 
         margin-bottom: 20px;
-        border-left: 5px solid #c0392b; /* アンツーカー色 */
     }
-    
-    /* 選手情報のタグ */
-    .tag {
-        display: inline-block;
-        padding: 4px 12px;
-        margin: 4px 2px;
-        background-color: #e8f5e9;
-        color: #1b4d3e;
-        border-radius: 15px;
-        font-size: 0.85em;
+    /* 選手名のスタイル */
+    .player-name-title {
+        font-size: 2.5em;
         font-weight: bold;
-        border: 1px solid #1b4d3e;
+        margin-bottom: 5px;
     }
-    
-    /* 特別なタグ（ドラフトなど） */
-    .tag-highlight {
-        background-color: #fff3e0;
-        color: #e67e22;
-        border: 1px solid #e67e22;
+    .player-kana {
+        font-size: 0.55em;
+        margin-left: 12px;
+        font-weight: normal;
     }
-
-    /* リンクボタンのスタイル調整 */
-    .stButton button {
-        width: 100%;
-        border-radius: 5px;
-    }
+    /* リンクボタンのテキスト太字 */
+    div[data-testid="stLinkButton"] p { font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# 2. データ接続 & 取得ロジック (BigQuery Connection)
-# -----------------------------------------------------------------------------
-# キャッシュを使ってAPIコール数を節約
-@st.cache_data(ttl=3600)
-def run_query(query):
+# --- 1. BigQuery接続設定 ---
+@st.cache_resource
+def get_bq_client():
     try:
-        # st.connectionを使用してBigQueryに接続
-        # secrets.tomlの設定が必要です
-        conn = st.connection('bigquery', type='sql')
-        return conn.query(query).to_df()
+        scopes = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ]
+        credentials = google.oauth2.service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=scopes
+        )
+        return bigquery.Client(credentials=credentials, project=credentials.project_id)
     except Exception as e:
-        st.error(f"データ取得エラー: {e}")
-        return pd.DataFrame()
+        st.error(f"認証エラー: {e}")
+        st.stop()
 
-# -----------------------------------------------------------------------------
-# 3. 画面コンポーネント (Views)
-# -----------------------------------------------------------------------------
+client = get_bq_client()
+PROJECT_ID = st.secrets["gcp_service_account"]["project_id"]
+RAW_DATASET_ID = "koshien_data"
+APP_DATASET_ID = "koshien_app"
 
-def show_player_detail(name, school, year, season):
-    """選手詳細画面: 詳細情報と『つながり』を表示"""
+# --- 2. データ同期機能（強力版） ---
+def sync_data():
+    status_text = st.empty()
+    bar = st.progress(0)
+    dataset_ref = client.dataset(APP_DATASET_ID)
+    try:
+        client.get_dataset(dataset_ref)
+    except NotFound:
+        dataset = bigquery.Dataset(dataset_ref)
+        dataset.location = "US"
+        client.create_dataset(dataset)
+
+    tables = ["m_tournament", "m_school", "m_player", "t_results", "t_scores", "m_region"]
+    for i, table_name in enumerate(tables):
+        status_text.text(f"同期中： {table_name}...")
+        
+        # ★ここが重要：古いテーブルを一度削除して、列の変更を確実に反映させる
+        client.delete_table(f"{PROJECT_ID}.{APP_DATASET_ID}.{table_name}", not_found_ok=True)
+        
+        query = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{APP_DATASET_ID}.{table_name}` AS SELECT * FROM `{PROJECT_ID}.{RAW_DATASET_ID}.{table_name}`"
+        client.query(query).result()
+        bar.progress((i + 1) / len(tables))
+
+    st.success("最新のデータ構成で更新が完了しました！")
+    st.cache_data.clear()
+    st.rerun()
+
+# --- 3. データ取得・整形関数 ---
+
+def clean_and_rename(df):
+    if df.empty: return df
+    drop_cols = ['School_ID', 'ID', 'MatchLink', 'Tournament_ID', 'Region_ID']
+    df = df[[c for c in df.columns if c not in drop_cols]]
     
-    # 3-1. 選手情報の取得
-    sql_player = f"""
-        SELECT * FROM `koshien_app.m_player`
-        WHERE Name = '{name}' 
-          AND School_Name_Then = '{school}' 
-          AND Year = '{year}'
-          AND Season = '{season}'
-        LIMIT 1
+    # ★修正：Birth_Dateの揺らぎをここで吸収
+    # DBが Birth_Date でも BirthDate でも、どちらも '生年月日' に変換するように修正
+    if 'Birth_Date' in df.columns: df = df.rename(columns={'Birth_Date': '生年月日'})
+    if 'BirthDate' in df.columns: df = df.rename(columns={'BirthDate': '生年月日'})
+
+    rename_map = {
+        'Year': '年度', 'Season': '季節', 'Tournament': '大会名',
+        'School_Name_Now': '現在校名', 'School_Name_Then': '当時の校名',
+        'District': '地区', 'Prefecture': '都道府県',
+        'Uniform_Number': '背番号', 'Name': '氏名', 'Name_Kana': 'フリガナ',
+        'Position': '守備', 'Grade': '学年', 'Captain': '主将', 'Pro_Team': 'プロ入団', 
+        'Draft_Year': 'ドラフト年', 'Draft_Rank': '順位', 'Throw_Bat': '投打',
+        'Generation': '世代', 'Career_Path': '進路', 'Hometown': '出身地',
+        'U12': 'U12代表', 'U15': 'U15代表', 'U18': 'U18代表', 'U22': 'U22代表', 'JAPAN': '侍ジャパン',
+        'Rank': '成績', 'Win_Loss': '勝敗', 'Score': 'スコア', 'Opponent': '対戦校',
+        'Round': '回戦', 'Notes': '備考', 'History_Label': '出場回数'
+    }
+    return df.rename(columns=rename_map)
+
+@st.cache_data(ttl=3600)
+def get_tournaments():
+    try:
+        sql = "SELECT * FROM `{}.{}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC".format(PROJECT_ID, APP_DATASET_ID)
+        return client.query(sql).to_dataframe().drop_duplicates()
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def load_tournament_details(year, season):
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("year", "STRING", str(year)),
+        bigquery.ScalarQueryParameter("season", "STRING", str(season))
+    ])
+    sql_list = f"SELECT tr.District, tr.School_Name_Then, s.School_Name_Now, tr.History_Label, tr.Rank, tr.School_ID FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results` AS tr LEFT JOIN `{PROJECT_ID}.{APP_DATASET_ID}.m_school` AS s ON tr.School_ID = s.School_ID WHERE tr.Year = @year AND tr.Season = @season"
+    sql_scores = f"SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_scores` WHERE Year = @year AND Season = @season"
+    sql_members = f"SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player` WHERE Year = @year AND Season = @season"
+    return {
+        "list": client.query(sql_list, job_config=job_config).to_dataframe().drop_duplicates(),
+        "scores": client.query(sql_scores, job_config=job_config).to_dataframe().drop_duplicates(),
+        "members": client.query(sql_members, job_config=job_config).to_dataframe().drop_duplicates()
+    }
+
+@st.cache_data(ttl=3600)
+def search_players_list(query_text):
+    # ★修正：Generation列がまだ同期されていない場合に備えた安全策
+    # まずGenerationを含めて問い合わせてみる
+    sql = f"""
+    SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
+    FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
+    WHERE Name LIKE @q
+    GROUP BY Name, School_Name_Then
+    ORDER BY Last_Year DESC
+    LIMIT 50
     """
-    df_player = run_query(sql_player)
-
-    if df_player.empty:
-        st.error("選手データが見つかりませんでした。")
-        if st.button("トップに戻る"):
-            st.query_params.clear()
-            st.rerun()
-        return
-
-    player = df_player.iloc[0]
-
-    # 3-2. 戦績情報の取得 (学校・年度・季節で結合)
-    sql_results = f"""
-        SELECT Round, Match_Date, Opponent, Win_Loss, Score, Rank
-        FROM `koshien_app.t_results`
-        WHERE School_Name_Then = '{school}'
-          AND Year = '{year}'
-          AND Season = '{season}'
-        ORDER BY Match_Date
-    """
-    df_results = run_query(sql_results)
-
-    # --- UI 構築 ---
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
     
-    # ナビゲーション
-    if st.button("← 検索に戻る", key="back_btn"):
-        st.query_params.clear()
-        st.rerun()
-
-    # ヘッダーエリア
-    st.markdown(f"## {player['Name']} <small>({player['Name_Kana']})</small>", unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # 基本情報カード
-        st.markdown(f"""
-        <div class="info-card">
-            <h3>⚾ 基本プロフィール</h3>
-            <p>
-                <b>所属:</b> {player['School_Name_Then']} ({player['Year']}年 {player['Season']})<br>
-                <b>ポジション:</b> {player['Position']} (背番号 {player['Uniform_Number']})<br>
-                <b>学年:</b> {player['Grade']}　<b>投打:</b> {player['Throw_Bat']}<br>
-                <b>出身:</b> {player['Hometown']} ({player['BirthDate']})
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # マニアック情報タグ
-        tags = []
-        if player.get('Captain') == '主将': tags.append('<span class="tag">主将</span>')
-        if player.get('U18'): tags.append(f'<span class="tag tag-highlight">U-18代表</span>')
-        if player.get('Draft_Rank'): tags.append(f'<span class="tag tag-highlight">{player["Draft_Year"]}年 ドラフト{player["Draft_Rank"]}位 ({player["Pro_Team"]})</span>')
-        if player.get('Generation'): tags.append(f'<span class="tag">{player["Generation"]}</span>')
-        
-        st.markdown(" ".join(tags), unsafe_allow_html=True)
-        
-        # 進路情報
-        if player.get('Career_Path'):
-            st.info(f"🎓 進路・経歴: {player['Career_Path']}")
-
-    with col2:
-        # その大会の戦績
-        st.markdown("### 🏆 大会戦績")
-        if not df_results.empty:
-            st.dataframe(
-                df_results[['Round', 'Opponent', 'Win_Loss', 'Score']],
-                hide_index=True,
-                use_container_width=True
-            )
-            final_rank = df_results.iloc[-1]['Rank']
-            st.metric("最終結果", final_rank)
-        else:
-            st.write("戦績データなし")
-
-    # --- つながり (Connections) エリア ---
-    st.markdown("---")
-    st.subheader("🔗 つながる球児たち")
-    
-    c_col1, c_col2 = st.columns(2)
-
-    with c_col1:
-        st.markdown("#### 🤝 同チーム (チームメイト)")
-        # 同じ学校・年度・季節の選手
-        sql_teammates = f"""
-            SELECT Name, Position, Uniform_Number, Grade
-            FROM `koshien_app.m_player`
-            WHERE School_Name_Then = '{school}' 
-              AND Year = '{year}' 
-              AND Season = '{season}'
-              AND Name != '{name}'
-            ORDER BY CAST(Uniform_Number AS INT64)
+    try:
+        return client.query(sql, job_config=job_config).to_dataframe()
+    except Exception:
+        # エラー（列がないなど）が出たら、Generationなしで再トライ
+        sql_fallback = f"""
+        SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year
+        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
+        WHERE Name LIKE @q
+        GROUP BY Name, School_Name_Then
+        ORDER BY Last_Year DESC
+        LIMIT 50
         """
-        df_team = run_query(sql_teammates)
-        
-        for _, row in df_team.iterrows():
-            if st.button(f"{row['Name']} ({row['Position']})", key=f"tm_{row['Name']}"):
-                st.query_params.update({"page": "player", "name": row['Name'], "school": school, "year": year, "season": season})
-                st.rerun()
+        return client.query(sql_fallback, job_config=job_config).to_dataframe()
 
-    with c_col2:
-        generation_name = player.get('Generation')
-        if generation_name:
-            st.markdown(f"#### ✨ {generation_name} (同世代の注目選手)")
-            # 同じ世代かつ、ドラフト指名された選手などをピックアップ（ランダムまたは注目度順）
-            sql_gen = f"""
-                SELECT Name, School_Name_Then, Year, Season
-                FROM `koshien_app.m_player`
-                WHERE Generation = '{generation_name}'
-                  AND Name != '{name}'
-                  AND Draft_Rank IS NOT NULL  -- 注目選手としてドラフト指名選手を表示
-                LIMIT 10
-            """
-            df_gen = run_query(sql_gen)
-            
-            for _, row in df_gen.iterrows():
-                label = f"{row['Name']} ({row['School_Name_Then']})"
-                if st.button(label, key=f"gen_{row['Name']}_{row['School_Name_Then']}"):
-                    st.query_params.update({"page": "player", "name": row['Name'], "school": row['School_Name_Then'], "year": row['Year'], "season": row['Season']})
-                    st.rerun()
-        else:
-            st.write("世代データなし")
+@st.cache_data(ttl=3600)
+def get_player_detail(name, school_then):
+    sql = f"SELECT p.*, tr.Rank as Tournament_Rank FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player` AS p LEFT JOIN `{PROJECT_ID}.{APP_DATASET_ID}.t_results` AS tr ON p.School_ID = tr.School_ID AND p.Year = tr.Year AND p.Season = tr.Season WHERE p.Name = @name AND p.School_Name_Then = @school_then ORDER BY SAFE_CAST(p.Year AS INT64), p.Season"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", name), bigquery.ScalarQueryParameter("school_then", "STRING", school_then)])
+    return client.query(sql, job_config=job_config).to_dataframe()
 
+@st.cache_data(ttl=3600)
+def search_schools(query_text):
+    sql = f"SELECT DISTINCT School_ID, School_Name_Now, Prefecture, School_Name_Then FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_school` WHERE School_Name_Now LIKE @q OR School_Name_Then LIKE @q LIMIT 50"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
+    return client.query(sql, job_config=job_config).to_dataframe()
 
-def show_search_page():
-    """トップページ: 検索とピックアップ"""
+@st.cache_data(ttl=3600)
+def get_school_history_all(school_id):
+    sql = f"SELECT Year, Season, Tournament, School_Name_Then, Rank FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results` WHERE School_ID = @school_id ORDER BY SAFE_CAST(Year AS INT64) DESC"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("school_id", "STRING", school_id)])
+    return client.query(sql, job_config=job_config).to_dataframe()
+
+# --- 4. UI構築 ---
+
+st.sidebar.header("🔍 検索モード")
+search_mode = st.sidebar.radio("", ["🏟 大会から探す", "👤 選手名から探す", "🏫 高校名から探す"])
+st.sidebar.markdown("---")
+st.sidebar.caption("※列の追加・変更後は必ず更新ボタンを押してください。")
+if st.sidebar.button("🔄 データを最新に更新"):
+    with st.spinner("同期中..."): sync_data()
+
+# === モード1： 大会検索 ===
+if search_mode == "🏟 大会から探す":
+    df_tourney = get_tournaments()
+    if df_tourney.empty:
+        st.info("左下の更新ボタンを押してデータを読み込んでください。")
+        st.stop()
+    df_tourney = df_tourney.fillna('')
+    tourney_map = {f"{r['Year']} {r['Season']} － {r['Tournament']}": {"year": r['Year'], "season": r['Season'], "name": r['Tournament'], "l1": r.get('Year_Link',''), "l2": r.get('History_Link',''), "l3": r.get('Virtual_Koshien_Link','')} for _, r in df_tourney.iterrows()}
     
-    st.title("⚾ KOSHIEN DATABASE")
-    st.caption("13年の情熱が詰まった、高校野球（甲子園）記録アーカイブ")
-
-    # 検索フィルター
-    with st.expander("🔍 選手・学校を検索", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            search_name = st.text_input("選手名 (一部でも可)")
-        with col2:
-            search_school = st.text_input("高校名")
-        with col3:
-            # データベースから存在する年代を取得しても良いが、ここでは簡易的にリスト化
-            years = [str(y) for y in range(2024, 1914, -1)]
-            search_year = st.selectbox("年度", ["指定なし"] + years)
-
-        search_btn = st.button("検索する", type="primary")
-
-    # 検索実行ロジック
-    if search_btn:
-        conditions = []
-        if search_name: conditions.append(f"Name LIKE '%{search_name}%'")
-        if search_school: conditions.append(f"School_Name_Then LIKE '%{search_school}%'")
-        if search_year != "指定なし": conditions.append(f"Year = '{search_year}'")
-        
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
-        limit = 50 if conditions else 10 # 条件なしなら少なめに
-
-        # 結果表示用クエリ
-        sql = f"""
-            SELECT Name, School_Name_Then, Year, Season, Position, Generation
-            FROM `koshien_app.m_player`
-            WHERE {where_clause}
-            ORDER BY Year DESC, School_Name_Then
-            LIMIT {limit}
-        """
-        
-        st.markdown("### 検索結果")
-        df_results = run_query(sql)
-        
-        if df_results.empty:
-            st.warning("該当するデータが見つかりませんでした。条件を変えて検索してください。")
-        else:
-            # カード形式でリスト表示
-            for _, row in df_results.iterrows():
-                with st.container():
-                    c1, c2 = st.columns([3, 1])
-                    with c1:
-                        st.markdown(f"**{row['Name']}** <small>{row['School_Name_Then']} ({row['Year']} {row['Season']})</small>", unsafe_allow_html=True)
-                        if row['Generation']:
-                            st.caption(f"世代: {row['Generation']}")
-                    with c2:
-                        if st.button("詳細", key=f"btn_{row['Name']}_{row['Year']}"):
-                            # URLパラメータをセットしてリロード
-                            st.query_params.update({
-                                "page": "player",
-                                "name": row['Name'],
-                                "school": row['School_Name_Then'],
-                                "year": row['Year'],
-                                "season": row['Season']
-                            })
-                            st.rerun()
-                    st.divider()
-
-    else:
-        # 初期表示: 例えば「最近のドラフト指名選手」などを表示してワクワクさせる
-        st.markdown("### 🌟 ピックアップ：プロ入りした球児たち")
-        sql_pickup = """
-            SELECT Name, School_Name_Then, Year, Season, Pro_Team
-            FROM `koshien_app.m_player`
-            WHERE Draft_Year IS NOT NULL
-            ORDER BY RAND()
-            LIMIT 6
-        """
-        df_pickup = run_query(sql_pickup)
-        
-        cols = st.columns(3)
-        for i, row in df_pickup.iterrows():
-            with cols[i % 3]:
-                st.markdown(f"""
-                <div class="info-card" style="border-left: 5px solid #1b4d3e;">
-                    <b>{row['Name']}</b><br>
-                    <small>{row['School_Name_Then']}</small><br>
-                    <span style="color:#e67e22;">➡ {row['Pro_Team']}</span>
-                </div>
-                """, unsafe_allow_html=True)
-                if st.button("詳細を見る", key=f"pick_{i}"):
-                    st.query_params.update({
-                        "page": "player",
-                        "name": row['Name'],
-                        "school": row['School_Name_Then'],
-                        "year": row['Year'],
-                        "season": row['Season']
-                    })
-                    st.rerun()
-
-# -----------------------------------------------------------------------------
-# 4. メインルーティング (Main Routing)
-# -----------------------------------------------------------------------------
-def main():
-    # URLパラメータを取得
-    params = st.query_params
-    page = params.get("page", "home")
-
-    if page == "player":
-        name = params.get("name")
-        school = params.get("school")
-        year = params.get("year")
-        season = params.get("season")
-        
-        if name and school and year:
-            show_player_detail(name, school, year, season)
-        else:
-            st.error("パラメータが不足しています")
-            if st.button("戻る"):
-                st.query_params.clear()
-                st.rerun()
+    selected_label = st.sidebar.selectbox("大会を選択", list(tourney_map.keys()))
+    sel = tourney_map[selected_label]
+    st.header(selected_label)
     
-    # 将来的に 'school' ページなどを追加可能
-    # elif page == "school":
-    #     show_school_detail(...)
+    links = [("🔗 組み合わせ表", sel["l1"]), ("🏛 甲子園歴史館", sel["l2"]), ("📺 バーチャル高校野球", sel["l3"])]
+    valid_links = [(t, u) for t, u in links if u and str(u).startswith("http")]
+    if valid_links:
+        cols = st.columns(len(valid_links))
+        for i, (t, u) in enumerate(valid_links): cols[i].link_button(t, u)
     
-    else:
-        show_search_page()
+    st.divider()
+    with st.spinner("データ展開中..."):
+        data = load_tournament_details(sel["year"], sel["season"])
+        df_list = data["list"]
 
-if __name__ == "__main__":
-    main()
+    if not df_list.empty:
+        st.dataframe(clean_and_rename(df_list), use_container_width=True, hide_index=True)
+        st.subheader("🔽 詳細データ閲覧")
+        school_opts = dict(zip(df_list['School_Name_Then'], df_list['School_ID']))
+        selected_school = st.selectbox("高校を選択してください", list(school_opts.keys()))
+        if selected_school:
+            sid = school_opts[selected_school]
+            t1, t2 = st.tabs(["⚾️ 戦績・スコア", "👥 登録メンバー"])
+            with t1:
+                df_s = data["scores"][data["scores"]['School_ID'] == sid]
+                if not df_s.empty: st.dataframe(clean_and_rename(df_s[['Round', 'Opponent', 'Win_Loss', 'Score', 'Notes']]), use_container_width=True, hide_index=True)
+                else: st.info("データなし")
+            with t2:
+                df_m = data["members"][data["members"]['School_ID'] == sid]
+                if not df_m.empty:
+                    df_m = df_m.sort_values('Uniform_Number', key=lambda x: pd.to_numeric(x, errors='coerce'))
+                    st.dataframe(clean_and_rename(df_m[['Uniform_Number', 'Position', 'Name', 'Name_Kana', 'Grade', 'Captain', 'Pro_Team']]), use_container_width=True, hide_index=True)
+                else: st.info("データなし")
+
+# === モード2： 選手検索 ===
+elif search_mode == "👤 選手名から探す":
+    st.subheader("👤 選手検索")
+    q = st.text_input("選手名を入力してください", placeholder="例：松坂大輔、宮下朝陽")
+    if q:
+        candidates = search_players_list(q)
+        if not candidates.empty:
+            # Generationがあれば表示、なければLast_Yearを表示（エラー回避）
+            candidates['label'] = candidates.apply(lambda r: f"{r['Name']} （{r['School_Name_Then']} － {r['Generation'] if 'Generation' in r and pd.notna(r['Generation']) else r['Last_Year']}世代）", axis=1)
+            selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
+            if selected_candidate_label:
+                sel_row = candidates[candidates['label'] == selected_candidate_label].iloc[0]
+                details = get_player_detail(sel_row['Name'], sel_row['School_Name_Then'])
+                if not details.empty:
+                    profile = details.iloc[-1]
+                    kana = f"（{profile['Name_Kana']}）" if pd.notna(profile.get('Name_Kana')) else ""
+                    st.markdown(f"<div class='player-name-title'>{profile['Name']}<span class='player-kana'>{kana}</span></div>", unsafe_allow_html=True)
+                    
+                    meta = []
+                    if 'School_Name_Then' in profile: meta.append(f"🏫 {profile['School_Name_Then']}")
+                    
+                    # ★修正：Birth_DateとBirthDateの両方に対応
+                    bday = profile.get('Birth_Date') or profile.get('BirthDate')
+                    if pd.notna(bday): meta.append(f"🎂 {bday}生")
+                    
+                    if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
+                    if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
+                    if pd.notna(profile.get('Career_Path')): meta.append(f"👣 進路： {profile['Career_Path']}")
+                    st.markdown(f"<div class='profile-meta'>{'　|　'.join(meta)}</div>", unsafe_allow_html=True)
+
+                    if pd.notna(profile.get('Pro_Team')) and profile['Pro_Team'] != '':
+                        st.markdown(f"<div class='pro-box'>🚀 NPB入団： {profile['Pro_Team']} （{profile.get('Draft_Year','')}年 {profile.get('Draft_Rank','')}位）</div>", unsafe_allow_html=True)
+
+                    japan_h = [f"{c}： {profile[c]}" for c in ['U12', 'U15', 'U18', 'U22', 'JAPAN'] if pd.notna(profile.get(c)) and str(profile[c]).strip() != '']
+                    if japan_h: st.markdown(f"<div class='japan-box'>🇯🇵 代表経歴： {' ／ '.join(japan_h)}</div>", unsafe_allow_html=True)
+
+                    st.subheader("🏟 甲子園 出場記録")
+                    cols = ['Year', 'Season', 'Grade', 'Uniform_Number', 'Position', 'Throw_Bat', 'Tournament_Rank']
+                    st.dataframe(clean_and_rename(details[[c for c in cols if c in details.columns]]), use_container_width=True, hide_index=True)
+                else: st.error("データなし")
+        else: st.warning("該当なし")
+
+# === モード3： 高校検索 ===
+elif search_mode == "🏫 高校名から探す":
+    st.subheader("🏫 高校検索")
+    q = st.text_input("高校名を入力")
+    if q:
+        res = search_schools(q)
+        if not res.empty:
+            res['label'] = res.apply(lambda x: f"{x['School_Name_Now']} （{x['Prefecture']}）", axis=1)
+            school_select = st.selectbox("高校を選択", res['label'].unique())
+            sid = res[res['label'] == school_select].iloc[0]['School_ID']
+            st.divider()
+            st.markdown(f"### 📜 {school_select} の成績")
+            st.dataframe(clean_and_rename(get_school_history_all(sid)), use_container_width=True, hide_index=True)
