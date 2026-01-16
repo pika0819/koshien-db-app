@@ -4,17 +4,11 @@ from google.api_core.exceptions import NotFound
 import pandas as pd
 import google.oauth2.service_account
 
-# -----------------------------------------------------------------------------
-# 1. 設定 & デザイン (Config & CSS)
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="甲子園DB", 
-    layout="wide", 
-    page_icon="⚾",
-    initial_sidebar_state="expanded"
-)
+# --- ページ設定 ---
+st.set_page_config(page_title="甲子園DB", layout="wide", page_icon="⚾")
+st.title("⚾️ 甲子園DB")
 
-# カスタムCSS（ご提示のデザイン + ボタンのリンク化調整）
+# --- デザインCSS ---
 st.markdown("""
 <style>
     /* プロ入り情報：落ち着いたグリーン */
@@ -36,46 +30,24 @@ st.markdown("""
     .profile-meta {
         font-size: 1.0em; 
         margin-bottom: 20px;
-        color: #333;
     }
     /* 選手名のスタイル */
     .player-name-title {
         font-size: 2.5em;
         font-weight: bold;
         margin-bottom: 5px;
-        color: #1b4d3e;
     }
     .player-kana {
         font-size: 0.55em;
         margin-left: 12px;
         font-weight: normal;
-        color: #666;
     }
-    /* 検索結果などのカード */
-    .result-card {
-        padding: 15px;
-        background-color: white;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 10px;
-        border-left: 5px solid #c0392b;
-        transition: transform 0.2s;
-    }
-    .result-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-    /* Streamlit標準ボタンをリンクっぽく見せるハック（任意） */
-    div.stButton > button {
-        width: 100%;
-        border-radius: 6px;
-    }
+    /* リンクボタンのテキスト太字 */
+    div[data-testid="stLinkButton"] p { font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# 2. BigQuery接続設定 (既存の環境を維持)
-# -----------------------------------------------------------------------------
+# --- 1. BigQuery接続設定 ---
 @st.cache_resource
 def get_bq_client():
     try:
@@ -98,24 +70,42 @@ PROJECT_ID = st.secrets["gcp_service_account"]["project_id"]
 RAW_DATASET_ID = "koshien_data"
 APP_DATASET_ID = "koshien_app"
 
-# -----------------------------------------------------------------------------
-# 3. ユーティリティ関数 (整形・遷移・同期)
-# -----------------------------------------------------------------------------
+# --- 2. データ同期機能（強力版） ---
+def sync_data():
+    status_text = st.empty()
+    bar = st.progress(0)
+    dataset_ref = client.dataset(APP_DATASET_ID)
+    try:
+        client.get_dataset(dataset_ref)
+    except NotFound:
+        dataset = bigquery.Dataset(dataset_ref)
+        dataset.location = "US"
+        client.create_dataset(dataset)
 
-def go_to(page, **kwargs):
-    """画面遷移用ヘルパー関数"""
-    params = {"page": page}
-    params.update(kwargs)
-    st.query_params.update(params)
+    tables = ["m_tournament", "m_school", "m_player", "t_results", "t_scores", "m_region"]
+    for i, table_name in enumerate(tables):
+        status_text.text(f"同期中： {table_name}...")
+        
+        # ★ここが重要：古いテーブルを一度削除して、列の変更を確実に反映させる
+        client.delete_table(f"{PROJECT_ID}.{APP_DATASET_ID}.{table_name}", not_found_ok=True)
+        
+        query = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{APP_DATASET_ID}.{table_name}` AS SELECT * FROM `{PROJECT_ID}.{RAW_DATASET_ID}.{table_name}`"
+        client.query(query).result()
+        bar.progress((i + 1) / len(tables))
+
+    st.success("最新のデータ構成で更新が完了しました！")
+    st.cache_data.clear()
     st.rerun()
 
+# --- 3. データ取得・整形関数 ---
+
 def clean_and_rename(df):
-    """データフレームの列名整理"""
     if df.empty: return df
     drop_cols = ['School_ID', 'ID', 'MatchLink', 'Tournament_ID', 'Region_ID']
     df = df[[c for c in df.columns if c not in drop_cols]]
     
-    # Birth_Dateの揺らぎ吸収
+    # ★修正：Birth_Dateの揺らぎをここで吸収
+    # DBが Birth_Date でも BirthDate でも、どちらも '生年月日' に変換するように修正
     if 'Birth_Date' in df.columns: df = df.rename(columns={'Birth_Date': '生年月日'})
     if 'BirthDate' in df.columns: df = df.rename(columns={'BirthDate': '生年月日'})
 
@@ -133,344 +123,178 @@ def clean_and_rename(df):
     }
     return df.rename(columns=rename_map)
 
-def sync_data():
-    """データ同期機能"""
-    status_text = st.empty()
-    bar = st.progress(0)
-    dataset_ref = client.dataset(APP_DATASET_ID)
+@st.cache_data(ttl=3600)
+def get_tournaments():
     try:
-        client.get_dataset(dataset_ref)
-    except NotFound:
-        dataset = bigquery.Dataset(dataset_ref)
-        dataset.location = "US"
-        client.create_dataset(dataset)
-
-    tables = ["m_tournament", "m_school", "m_player", "t_results", "t_scores", "m_region"]
-    for i, table_name in enumerate(tables):
-        status_text.text(f"同期中： {table_name}...")
-        client.delete_table(f"{PROJECT_ID}.{APP_DATASET_ID}.{table_name}", not_found_ok=True)
-        query = f"CREATE OR REPLACE TABLE `{PROJECT_ID}.{APP_DATASET_ID}.{table_name}` AS SELECT * FROM `{PROJECT_ID}.{RAW_DATASET_ID}.{table_name}`"
-        client.query(query).result()
-        bar.progress((i + 1) / len(tables))
-
-    st.success("最新のデータ構成で更新が完了しました！")
-    st.cache_data.clear()
-    st.rerun()
-
-# -----------------------------------------------------------------------------
-# 4. データ取得ロジック (Queries)
-# -----------------------------------------------------------------------------
-
-@st.cache_data(ttl=3600)
-def get_player_detail_full(name, school_then, year):
-    """特定の選手の詳細情報を取得"""
-    # 年度が重複する同姓同名対策でYearも条件に追加
-    sql = f"""
-        SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
-        WHERE Name = @name AND School_Name_Then = @school AND Year = @year
-        LIMIT 1
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("name", "STRING", name),
-        bigquery.ScalarQueryParameter("school", "STRING", school_then),
-        bigquery.ScalarQueryParameter("year", "STRING", year)
-    ])
-    return client.query(sql, job_config=job_config).to_dataframe()
-
-@st.cache_data(ttl=3600)
-def get_player_results(school_id, year, season):
-    """選手の戦績（チーム成績）を取得"""
-    sql = f"""
-        SELECT Round, Match_Date, Opponent, Win_Loss, Score, Rank
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results`
-        WHERE School_ID = @sid AND Year = @year AND Season = @season
-        ORDER BY Match_Date
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("sid", "STRING", school_id),
-        bigquery.ScalarQueryParameter("year", "STRING", year),
-        bigquery.ScalarQueryParameter("season", "STRING", season)
-    ])
-    return client.query(sql, job_config=job_config).to_dataframe()
-
-@st.cache_data(ttl=3600)
-def get_teammates(school_id, year, season, exclude_name):
-    """チームメイトを取得"""
-    sql = f"""
-        SELECT Name, Position, Uniform_Number, Grade, School_Name_Then, Year, Season
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
-        WHERE School_ID = @sid AND Year = @year AND Season = @season AND Name != @name
-        ORDER BY SAFE_CAST(Uniform_Number AS INT64)
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("sid", "STRING", school_id),
-        bigquery.ScalarQueryParameter("year", "STRING", year),
-        bigquery.ScalarQueryParameter("season", "STRING", season),
-        bigquery.ScalarQueryParameter("name", "STRING", exclude_name)
-    ])
-    return client.query(sql, job_config=job_config).to_dataframe()
-
-@st.cache_data(ttl=3600)
-def get_generation_stars(generation, exclude_name):
-    """同世代の注目選手（ドラフト指名あり）を取得"""
-    if not generation: return pd.DataFrame()
-    sql = f"""
-        SELECT Name, School_Name_Then, Year, Season, Pro_Team
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
-        WHERE Generation = @gen AND Name != @name AND Draft_Year IS NOT NULL
-        ORDER BY RAND() LIMIT 10
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("gen", "STRING", generation),
-        bigquery.ScalarQueryParameter("name", "STRING", exclude_name)
-    ])
-    return client.query(sql, job_config=job_config).to_dataframe()
-
-@st.cache_data(ttl=3600)
-def search_global(keyword):
-    """統合検索: 選手と学校をまとめて検索"""
-    # 選手検索
-    sql_p = f"""
-        SELECT 'Player' as Type, Name as Label, School_Name_Then as SubLabel, Year, Season, School_Name_Then as School
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
-        WHERE Name LIKE @q
-        ORDER BY Year DESC LIMIT 20
-    """
-    # 学校検索
-    sql_s = f"""
-        SELECT 'School' as Type, School_Name_Now as Label, Prefecture as SubLabel, NULL as Year, NULL as Season, NULL as School
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_school`
-        WHERE School_Name_Now LIKE @q OR School_Name_Then LIKE @q
-        LIMIT 10
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{keyword}%")])
-    
-    df_p = client.query(sql_p, job_config=job_config).to_dataframe()
-    df_s = client.query(sql_s, job_config=job_config).to_dataframe()
-    return pd.concat([df_p, df_s], ignore_index=True)
-
-@st.cache_data(ttl=3600)
-def get_tournaments_list():
-    sql = f"SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC"
-    return client.query(sql).to_dataframe().drop_duplicates()
+        sql = "SELECT * FROM `{}.{}.m_tournament` ORDER BY SAFE_CAST(Year AS INT64) DESC, Season DESC".format(PROJECT_ID, APP_DATASET_ID)
+        return client.query(sql).to_dataframe().drop_duplicates()
+    except: return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_tournament_details(year, season):
-    # 特定大会の全出場校リスト
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("year", "STRING", str(year)),
         bigquery.ScalarQueryParameter("season", "STRING", str(season))
     ])
+    sql_list = f"SELECT tr.District, tr.School_Name_Then, s.School_Name_Now, tr.History_Label, tr.Rank, tr.School_ID FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results` AS tr LEFT JOIN `{PROJECT_ID}.{APP_DATASET_ID}.m_school` AS s ON tr.School_ID = s.School_ID WHERE tr.Year = @year AND tr.Season = @season"
+    sql_scores = f"SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_scores` WHERE Year = @year AND Season = @season"
+    sql_members = f"SELECT * FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player` WHERE Year = @year AND Season = @season"
+    return {
+        "list": client.query(sql_list, job_config=job_config).to_dataframe().drop_duplicates(),
+        "scores": client.query(sql_scores, job_config=job_config).to_dataframe().drop_duplicates(),
+        "members": client.query(sql_members, job_config=job_config).to_dataframe().drop_duplicates()
+    }
+
+@st.cache_data(ttl=3600)
+def search_players_list(query_text):
+    # ★修正：Generation列がまだ同期されていない場合に備えた安全策
+    # まずGenerationを含めて問い合わせてみる
     sql = f"""
-        SELECT tr.School_Name_Then, tr.Rank, tr.School_ID, tr.Win_Loss, tr.History_Label
-        FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results` AS tr 
-        WHERE tr.Year = @year AND tr.Season = @season
-        ORDER BY 
-            CASE WHEN Rank = '優勝' THEN 1 WHEN Rank = '準優勝' THEN 2 WHEN Rank LIKE '%4強%' THEN 3 ELSE 4 END
+    SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year, MAX(Generation) as Generation
+    FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
+    WHERE Name LIKE @q
+    GROUP BY Name, School_Name_Then
+    ORDER BY Last_Year DESC
+    LIMIT 50
     """
-    return client.query(sql, job_config=job_config).to_dataframe().drop_duplicates()
-
-# -----------------------------------------------------------------------------
-# 5. 各画面のビュー関数 (Views)
-# -----------------------------------------------------------------------------
-
-def view_home():
-    """トップページ（検索 & メニュー）"""
-    st.title("⚾ KOSHIEN DATABASE")
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
     
-    # 検索バー
-    with st.container():
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            q = st.text_input("選手名・高校名で検索", placeholder="例: 松坂大輔, 大阪桐蔭")
-        with col2:
-            st.write("") # Spacer
-            st.write("") 
-            search_btn = st.button("検索", type="primary", use_container_width=True)
+    try:
+        return client.query(sql, job_config=job_config).to_dataframe()
+    except Exception:
+        # エラー（列がないなど）が出たら、Generationなしで再トライ
+        sql_fallback = f"""
+        SELECT Name, MAX(Name_Kana) as Name_Kana, School_Name_Then, MAX(Year) as Last_Year
+        FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player`
+        WHERE Name LIKE @q
+        GROUP BY Name, School_Name_Then
+        ORDER BY Last_Year DESC
+        LIMIT 50
+        """
+        return client.query(sql_fallback, job_config=job_config).to_dataframe()
 
-    if q or search_btn:
-        st.subheader(f"🔍 '{q}' の検索結果")
-        results = search_global(q)
-        if results.empty:
-            st.info("該当データなし")
-        else:
-            for _, row in results.iterrows():
-                # カードクリックのような挙動をボタンで実装
-                with st.container():
-                    c1, c2 = st.columns([4, 1])
-                    with c1:
-                        icon = "👤" if row['Type'] == 'Player' else "🏫"
-                        label_main = f"**{row['Label']}**"
-                        label_sub = f"<small>{row['SubLabel']}</small>"
-                        if row['Type'] == 'Player':
-                            label_sub += f" <small>({row['Year']} {row['Season']})</small>"
-                        
-                        st.markdown(f"""
-                        <div class="result-card">
-                            <span style="font-size:1.2em">{icon} {label_main}</span><br>
-                            {label_sub}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with c2:
-                        st.write("")
-                        if row['Type'] == 'Player':
-                            if st.button("詳細", key=f"btn_{row['Label']}_{row['Year']}_{row['Season']}"):
-                                go_to("player", name=row['Label'], school=row['School'], year=row['Year'])
-                        else:
-                            # 高校詳細は今回は簡易実装（または未実装）
-                            if st.button("詳細", key=f"btn_sch_{row['Label']}"):
-                                st.toast("高校詳細ページは準備中です") 
+@st.cache_data(ttl=3600)
+def get_player_detail(name, school_then):
+    sql = f"SELECT p.*, tr.Rank as Tournament_Rank FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_player` AS p LEFT JOIN `{PROJECT_ID}.{APP_DATASET_ID}.t_results` AS tr ON p.School_ID = tr.School_ID AND p.Year = tr.Year AND p.Season = tr.Season WHERE p.Name = @name AND p.School_Name_Then = @school_then ORDER BY SAFE_CAST(p.Year AS INT64), p.Season"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", name), bigquery.ScalarQueryParameter("school_then", "STRING", school_then)])
+    return client.query(sql, job_config=job_config).to_dataframe()
 
+@st.cache_data(ttl=3600)
+def search_schools(query_text):
+    sql = f"SELECT DISTINCT School_ID, School_Name_Now, Prefecture, School_Name_Then FROM `{PROJECT_ID}.{APP_DATASET_ID}.m_school` WHERE School_Name_Now LIKE @q OR School_Name_Then LIKE @q LIMIT 50"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{query_text}%")])
+    return client.query(sql, job_config=job_config).to_dataframe()
+
+@st.cache_data(ttl=3600)
+def get_school_history_all(school_id):
+    sql = f"SELECT Year, Season, Tournament, School_Name_Then, Rank FROM `{PROJECT_ID}.{APP_DATASET_ID}.t_results` WHERE School_ID = @school_id ORDER BY SAFE_CAST(Year AS INT64) DESC"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("school_id", "STRING", school_id)])
+    return client.query(sql, job_config=job_config).to_dataframe()
+
+# --- 4. UI構築 ---
+
+st.sidebar.header("🔍 検索モード")
+search_mode = st.sidebar.radio("", ["🏟 大会から探す", "👤 選手名から探す", "🏫 高校名から探す"])
+st.sidebar.markdown("---")
+st.sidebar.caption("※列の追加・変更後は必ず更新ボタンを押してください。")
+if st.sidebar.button("🔄 データを最新に更新"):
+    with st.spinner("同期中..."): sync_data()
+
+# === モード1： 大会検索 ===
+if search_mode == "🏟 大会から探す":
+    df_tourney = get_tournaments()
+    if df_tourney.empty:
+        st.info("左下の更新ボタンを押してデータを読み込んでください。")
+        st.stop()
+    df_tourney = df_tourney.fillna('')
+    tourney_map = {f"{r['Year']} {r['Season']} － {r['Tournament']}": {"year": r['Year'], "season": r['Season'], "name": r['Tournament'], "l1": r.get('Year_Link',''), "l2": r.get('History_Link',''), "l3": r.get('Virtual_Koshien_Link','')} for _, r in df_tourney.iterrows()}
+    
+    selected_label = st.sidebar.selectbox("大会を選択", list(tourney_map.keys()))
+    sel = tourney_map[selected_label]
+    st.header(selected_label)
+    
+    links = [("🔗 組み合わせ表", sel["l1"]), ("🏛 甲子園歴史館", sel["l2"]), ("📺 バーチャル高校野球", sel["l3"])]
+    valid_links = [(t, u) for t, u in links if u and str(u).startswith("http")]
+    if valid_links:
+        cols = st.columns(len(valid_links))
+        for i, (t, u) in enumerate(valid_links): cols[i].link_button(t, u)
+    
     st.divider()
-    
-    # 大会一覧（アコーディオン）
-    st.subheader("🏟 過去の大会を見る")
-    df_tourney = get_tournaments_list()
-    if not df_tourney.empty:
-        years = df_tourney['Year'].unique()
-        selected_year = st.selectbox("年度を選択", years)
-        
-        filtered = df_tourney[df_tourney['Year'] == selected_year]
-        for _, row in filtered.iterrows():
-            col_t1, col_t2 = st.columns([3, 1])
-            with col_t1:
-                st.write(f"**{row['Season']}** : {row['Tournament']}")
-            with col_t2:
-                if st.button("大会結果", key=f"tourney_{row['ID']}"):
-                    go_to("tournament", year=row['Year'], season=row['Season'], name=row['Tournament'])
+    with st.spinner("データ展開中..."):
+        data = load_tournament_details(sel["year"], sel["season"])
+        df_list = data["list"]
 
-def view_player_detail(name, school_then, year):
-    """選手詳細画面"""
-    if st.button("← 検索に戻る"):
-        go_to("home")
-
-    # データ取得
-    df_player = get_player_detail_full(name, school_then, year)
-    
-    if df_player.empty:
-        st.error("選手データが見つかりませんでした。")
-        return
-
-    profile = df_player.iloc[0]
-    
-    # 戦績取得
-    df_results = get_player_results(profile['School_ID'], year, profile['Season'])
-    
-    # --- 表示ロジック（元のデザインを適用） ---
-    kana = f"（{profile['Name_Kana']}）" if pd.notna(profile.get('Name_Kana')) else ""
-    st.markdown(f"<div class='player-name-title'>{profile['Name']}<span class='player-kana'>{kana}</span></div>", unsafe_allow_html=True)
-    
-    meta = []
-    meta.append(f"🏫 {profile['School_Name_Then']} ({profile['Year']} {profile['Season']})")
-    
-    bday = profile.get('Birth_Date') or profile.get('BirthDate')
-    if pd.notna(bday): meta.append(f"🎂 {bday}生")
-    if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
-    if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
-    
-    st.markdown(f"<div class='profile-meta'>{'　|　'.join(meta)}</div>", unsafe_allow_html=True)
-
-    # プロ入り & 代表情報
-    if pd.notna(profile.get('Pro_Team')) and profile['Pro_Team'] != '':
-        st.markdown(f"<div class='pro-box'>🚀 NPB入団： {profile['Pro_Team']} （{profile.get('Draft_Year','')}年 {profile.get('Draft_Rank','')}位）</div>", unsafe_allow_html=True)
-
-    japan_h = [f"{c}： {profile[c]}" for c in ['U12', 'U15', 'U18', 'U22', 'JAPAN'] if pd.notna(profile.get(c)) and str(profile[c]).strip() != '']
-    if japan_h: st.markdown(f"<div class='japan-box'>🇯🇵 代表経歴： {' ／ '.join(japan_h)}</div>", unsafe_allow_html=True)
-
-    # 戦績テーブル
-    st.markdown("### 🏟 甲子園での軌跡")
-    if not df_results.empty:
-        st.dataframe(clean_and_rename(df_results[['Round', 'Opponent', 'Win_Loss', 'Score']]), hide_index=True)
-        final = df_results.iloc[-1]['Rank']
-        st.caption(f"最終結果: {final}")
-
-    st.divider()
-
-    # --- つながり機能 ---
-    c1, c2 = st.columns(2)
-    
-    with c1:
-        st.markdown(f"#### 🤝 {profile['School_Name_Then']} の仲間たち")
-        df_team = get_teammates(profile['School_ID'], year, profile['Season'], name)
-        if not df_team.empty:
-            for _, row in df_team.iterrows():
-                # ボタンで遷移
-                label = f"{row['Name']} ({row['Position']})"
-                if st.button(label, key=f"tm_{row['Name']}_{row['Uniform_Number']}"):
-                    go_to("player", name=row['Name'], school=row['School_Name_Then'], year=row['Year'])
-        else:
-            st.caption("データなし")
-
-    with c2:
-        gen = profile.get('Generation')
-        if gen:
-            st.markdown(f"#### ✨ {gen} のスター選手")
-            df_gen = get_generation_stars(gen, name)
-            if not df_gen.empty:
-                for _, row in df_gen.iterrows():
-                    label = f"{row['Name']} ({row['School_Name_Then']})"
-                    if st.button(label, key=f"gen_{row['Name']}_{row['School_Name_Then']}"):
-                        go_to("player", name=row['Name'], school=row['School_Name_Then'], year=row['Year'])
-            else:
-                st.caption("他データなし")
-
-def view_tournament_detail(year, season, name):
-    """大会詳細画面"""
-    if st.button("← トップに戻る"):
-        go_to("home")
-    
-    st.header(f"{year} {season} - {name}")
-    
-    df_list = load_tournament_details(year, season)
-    
     if not df_list.empty:
-        st.markdown("#### 出場校一覧")
-        # 出場校をクリックするとその学校のメンバー表などの詳細へ行けるように拡張可能
-        # 今回は簡易的にリスト表示
         st.dataframe(clean_and_rename(df_list), use_container_width=True, hide_index=True)
-    else:
-        st.info("データがありません")
+        st.subheader("🔽 詳細データ閲覧")
+        school_opts = dict(zip(df_list['School_Name_Then'], df_list['School_ID']))
+        selected_school = st.selectbox("高校を選択してください", list(school_opts.keys()))
+        if selected_school:
+            sid = school_opts[selected_school]
+            t1, t2 = st.tabs(["⚾️ 戦績・スコア", "👥 登録メンバー"])
+            with t1:
+                df_s = data["scores"][data["scores"]['School_ID'] == sid]
+                if not df_s.empty: st.dataframe(clean_and_rename(df_s[['Round', 'Opponent', 'Win_Loss', 'Score', 'Notes']]), use_container_width=True, hide_index=True)
+                else: st.info("データなし")
+            with t2:
+                df_m = data["members"][data["members"]['School_ID'] == sid]
+                if not df_m.empty:
+                    df_m = df_m.sort_values('Uniform_Number', key=lambda x: pd.to_numeric(x, errors='coerce'))
+                    st.dataframe(clean_and_rename(df_m[['Uniform_Number', 'Position', 'Name', 'Name_Kana', 'Grade', 'Captain', 'Pro_Team']]), use_container_width=True, hide_index=True)
+                else: st.info("データなし")
 
-# -----------------------------------------------------------------------------
-# 6. メインルーティング (Main Router)
-# -----------------------------------------------------------------------------
-def main():
-    # サイドバー（管理者用機能）
-    st.sidebar.title("KOSHIEN DB")
-    if st.sidebar.button("🏠 ホームへ戻る"):
-        go_to("home")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.caption("管理者メニュー")
-    if st.sidebar.button("🔄 データを最新に同期"):
-        with st.spinner("同期中..."): 
-            sync_data()
+# === モード2： 選手検索 ===
+elif search_mode == "👤 選手名から探す":
+    st.subheader("👤 選手検索")
+    q = st.text_input("選手名を入力してください", placeholder="例：松坂大輔、宮下朝陽")
+    if q:
+        candidates = search_players_list(q)
+        if not candidates.empty:
+            # Generationがあれば表示、なければLast_Yearを表示（エラー回避）
+            candidates['label'] = candidates.apply(lambda r: f"{r['Name']} （{r['School_Name_Then']} － {r['Generation'] if 'Generation' in r and pd.notna(r['Generation']) else r['Last_Year']}世代）", axis=1)
+            selected_candidate_label = st.selectbox("詳細を見る選手を選択", candidates['label'])
+            if selected_candidate_label:
+                sel_row = candidates[candidates['label'] == selected_candidate_label].iloc[0]
+                details = get_player_detail(sel_row['Name'], sel_row['School_Name_Then'])
+                if not details.empty:
+                    profile = details.iloc[-1]
+                    kana = f"（{profile['Name_Kana']}）" if pd.notna(profile.get('Name_Kana')) else ""
+                    st.markdown(f"<div class='player-name-title'>{profile['Name']}<span class='player-kana'>{kana}</span></div>", unsafe_allow_html=True)
+                    
+                    meta = []
+                    if 'School_Name_Then' in profile: meta.append(f"🏫 {profile['School_Name_Then']}")
+                    
+                    # ★修正：Birth_DateとBirthDateの両方に対応
+                    bday = profile.get('Birth_Date') or profile.get('BirthDate')
+                    if pd.notna(bday): meta.append(f"🎂 {bday}生")
+                    
+                    if pd.notna(profile.get('Hometown')): meta.append(f"📍 {profile['Hometown']}出身")
+                    if pd.notna(profile.get('Generation')): meta.append(f"📅 {profile['Generation']}世代")
+                    if pd.notna(profile.get('Career_Path')): meta.append(f"👣 進路： {profile['Career_Path']}")
+                    st.markdown(f"<div class='profile-meta'>{'　|　'.join(meta)}</div>", unsafe_allow_html=True)
 
-    # URLパラメータによるルーティング
-    params = st.query_params
-    page = params.get("page", "home")
+                    if pd.notna(profile.get('Pro_Team')) and profile['Pro_Team'] != '':
+                        st.markdown(f"<div class='pro-box'>🚀 NPB入団： {profile['Pro_Team']} （{profile.get('Draft_Year','')}年 {profile.get('Draft_Rank','')}位）</div>", unsafe_allow_html=True)
 
-    if page == "home":
-        view_home()
-    
-    elif page == "player":
-        # 必須パラメータ取得
-        p_name = params.get("name")
-        p_school = params.get("school")
-        p_year = params.get("year")
-        
-        if p_name and p_school and p_year:
-            view_player_detail(p_name, p_school, p_year)
-        else:
-            st.error("パラメータ不足")
-            if st.button("戻る"): go_to("home")
+                    japan_h = [f"{c}： {profile[c]}" for c in ['U12', 'U15', 'U18', 'U22', 'JAPAN'] if pd.notna(profile.get(c)) and str(profile[c]).strip() != '']
+                    if japan_h: st.markdown(f"<div class='japan-box'>🇯🇵 代表経歴： {' ／ '.join(japan_h)}</div>", unsafe_allow_html=True)
 
-    elif page == "tournament":
-        t_year = params.get("year")
-        t_season = params.get("season")
-        t_name = params.get("name")
-        view_tournament_detail(t_year, t_season, t_name)
+                    st.subheader("🏟 甲子園 出場記録")
+                    cols = ['Year', 'Season', 'Grade', 'Uniform_Number', 'Position', 'Throw_Bat', 'Tournament_Rank']
+                    st.dataframe(clean_and_rename(details[[c for c in cols if c in details.columns]]), use_container_width=True, hide_index=True)
+                else: st.error("データなし")
+        else: st.warning("該当なし")
 
-if __name__ == "__main__":
-    main()
+# === モード3： 高校検索 ===
+elif search_mode == "🏫 高校名から探す":
+    st.subheader("🏫 高校検索")
+    q = st.text_input("高校名を入力")
+    if q:
+        res = search_schools(q)
+        if not res.empty:
+            res['label'] = res.apply(lambda x: f"{x['School_Name_Now']} （{x['Prefecture']}）", axis=1)
+            school_select = st.selectbox("高校を選択", res['label'].unique())
+            sid = res[res['label'] == school_select].iloc[0]['School_ID']
+            st.divider()
+            st.markdown(f"### 📜 {school_select} の成績")
+            st.dataframe(clean_and_rename(get_school_history_all(sid)), use_container_width=True, hide_index=True)
